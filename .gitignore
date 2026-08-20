@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+output/
+.venv/
+venv/
+spark-warehouse/
+
+# Run artifacts (default audit.path and .aud checksum manifests)
+audit/
+*.aud
+
+# Local snapshots / transfer archives
+proj.zip
+*.zip
+
+# Local environment + editor state
+.env
+.env.*
+.idea/
+.vscode/
+.DS_Store

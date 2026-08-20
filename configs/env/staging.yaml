@@ -1,0 +1,4 @@
+# Staging environment overrides.
+environment: staging
+spark:
+  master: "yarn"

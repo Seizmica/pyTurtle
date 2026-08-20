@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etl-framework"
+version = "0.1.0"
+description = "Config-driven PySpark ETL framework"
+requires-python = ">=3.10"
+dependencies = [
+    "pyspark>=3.4",
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "rdflib>=7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+    "black>=24.0",
+]
+delta = [
+    "delta-spark>=2.4",
+]
+
+[project.scripts]
+etl-run = "etl_framework.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint.per-file-ignores]
+# Integration tests call pytest.importorskip before importing Spark/Delta,
+# so module-level imports intentionally follow executable statements.
+"tests/integration/*" = ["E402"]
