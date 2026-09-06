@@ -22,8 +22,21 @@ output:
   format: parquet
   mode: overwrite
   partition_by: [run_date]
+  # Required for dynamic partition overwrite (see spark.conf below): the atomic
+  # staged commit deletes the whole output path before renaming staging into
+  # place, which would destroy prior partitions no matter what Spark is told.
+  # Spark handles per-partition replacement itself in dynamic mode.
+  atomic: false
   options:
     compression: snappy
+
+# Overwrite only the run_date partitions this run produces, not the whole table.
+# Static (Spark's default) overwrite would delete prior run_date partitions along
+# with their manifests, breaking the checkpoint_from chain in manifest_output.
+# Merges onto spark.conf from base.yaml and env/<env>.yaml.
+spark:
+  conf:
+    spark.sql.sources.partitionOverwriteMode: dynamic
 
 ttl_output:
   enabled: false
@@ -38,6 +51,24 @@ aud_output:
   enabled: true
   # path defaults to "<output.path>.aud"
   format: text
+  fail_on_error: false
+
+# One manifest.json per partition directory, written alongside that day's data:
+#   s3://curated/customer_daily/run_date=2026-06-28/manifest.json
+# It sits inside the data directory, so readers must glob for data files
+# (".../run_date=2026-06-28/*.parquet") rather than loading the directory.
+manifest_output:
+  enabled: true
+  filename: manifest.json
+  row_counts: true          # exact per-shard counts; costs one re-read of the output
+  uri_style: absolute       # or "relative" (to the partition directory)
+  app_version: null         # defaults to the framework version
+  checkpoint_format: "%Y%m%d%H%M%S"
+  # checkpoint_from is read from the newest prior partition's manifest;
+  # set these explicitly only to override the tracked watermark (backfills).
+  checkpoint_from: null
+  checkpoint_to: null
+  initial_checkpoint: null  # checkpoint_from for the very first run
   fail_on_error: false
 
 data_quality:

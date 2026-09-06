@@ -6,6 +6,7 @@ malformed configuration.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -73,6 +74,40 @@ class AudOutputSpec(_Base):
     fail_on_error: bool = False
 
 
+class ManifestOutputSpec(_Base):
+    """Per-partition ``manifest.json`` describing the shards written that run.
+
+    One manifest is written *inside* each partition directory the run produced
+    (``<output.path>/run_date=2026-06-28/manifest.json``), listing every data
+    shard with its URI, size, and row count.
+    """
+
+    enabled: bool = False
+    # File name written inside each partition directory. It lives alongside the
+    # data, so downstream readers must glob for data files (e.g. "*.parquet")
+    # rather than loading the directory wholesale.
+    filename: str = "manifest.json"
+    # Per-shard row counts require re-reading the written output once.
+    row_counts: bool = True
+    # Shard `uri`: fully qualified, or relative to the partition directory.
+    uri_style: Literal["absolute", "relative"] = "absolute"
+    # Stamped into the manifest; defaults to the framework version.
+    app_version: str | None = None
+    # strftime pattern for the framework-stamped `checkpoint_to`. The rendered
+    # value must be all digits — it is stored as an integer.
+    checkpoint_format: str = "%Y%m%d%H%M%S"
+    # Explicit overrides. Set either to bypass watermark tracking (backfills,
+    # or a scheduler that owns the watermark itself).
+    checkpoint_from: int | None = None
+    checkpoint_to: int | None = None
+    # `checkpoint_from` for the first run, when no prior manifest exists.
+    initial_checkpoint: int | None = None
+    # How many partition directories to scan back for the previous watermark.
+    lookback_partitions: int = 32
+    include_hidden: bool = False
+    fail_on_error: bool = False
+
+
 class SparkSpec(_Base):
     app_name: str = "etl_framework"
     master: str | None = None
@@ -129,6 +164,7 @@ class JobConfig(_Base):
     output: OutputSpec
     ttl_output: TtlOutputSpec = Field(default_factory=TtlOutputSpec)
     aud_output: AudOutputSpec = Field(default_factory=AudOutputSpec)
+    manifest_output: ManifestOutputSpec = Field(default_factory=ManifestOutputSpec)
     environment: str = "dev"
     spark: SparkSpec = Field(default_factory=SparkSpec)
     data_quality: DataQualitySpec = Field(default_factory=DataQualitySpec)
@@ -149,4 +185,20 @@ def validate_config(raw: dict[str, Any]) -> JobConfig:
             raise ValueError("output.mode 'merge' requires format 'delta'")
         if not cfg.output.merge_keys:
             raise ValueError("output.mode 'merge' requires 'merge_keys'")
+    if cfg.manifest_output.enabled:
+        _validate_manifest(cfg.manifest_output)
     return cfg
+
+
+def _validate_manifest(spec: ManifestOutputSpec) -> None:
+    """Fail before Spark starts on a manifest config that cannot produce a file."""
+    if "/" in spec.filename or "\\" in spec.filename or not spec.filename:
+        raise ValueError("manifest_output.filename must be a bare file name")
+    stamped = datetime.now(timezone.utc).strftime(spec.checkpoint_format)
+    if not stamped.isdigit():
+        raise ValueError(
+            "manifest_output.checkpoint_format must render digits only, "
+            f"got {stamped!r} from {spec.checkpoint_format!r}"
+        )
+    if spec.lookback_partitions < 0:
+        raise ValueError("manifest_output.lookback_partitions must not be negative")

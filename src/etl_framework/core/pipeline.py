@@ -11,6 +11,7 @@ from ..observability.metrics import RunMetrics
 from ..quality.schema_check import validate_schema
 from ..quality.validators import run_quality
 from ..stages.aud_stage import run_aud_stage
+from ..stages.manifest_stage import prepare_checkpoints, run_manifest_stage
 from ..stages.ttl_stage import run_ttl_stage
 from ..utils.retry import with_retry
 from .reader import register_inputs
@@ -75,6 +76,12 @@ def run_pipeline(cfg: JobConfig, dry_run: bool = False, spark=None) -> RunMetric
             _write_audit(cfg, metrics, logger)
             return metrics
 
+        # Resolved before the write: an overwrite can replace the partitions
+        # the previous run's watermark would otherwise be read from.
+        checkpoints = None
+        if cfg.manifest_output.enabled:
+            checkpoints = prepare_checkpoints(spark, cfg.manifest_output, cfg.output)
+
         metrics.start_stage("write")
         with_retry(
             lambda: write_output(result, cfg.output),
@@ -87,6 +94,11 @@ def run_pipeline(cfg: JobConfig, dry_run: bool = False, spark=None) -> RunMetric
 
         if cfg.ttl_output.enabled:
             _run_ttl(cfg, result, logger, metrics)
+
+        # Before the .aud stage, so the checksum manifest also covers the
+        # manifest files this stage drops into the partition directories.
+        if cfg.manifest_output.enabled:
+            _run_manifest(cfg, spark, result, checkpoints, logger, metrics)
 
         if cfg.aud_output.enabled:
             _run_aud(cfg, spark, logger, metrics)
@@ -130,6 +142,35 @@ def _run_aud(cfg, spark, logger, metrics) -> None:  # noqa: ANN001
         log(logger, "WARNING", "aud.soft_fail", error=str(exc))
     finally:
         metrics.end_stage("aud")
+
+
+def _run_manifest(cfg, spark, result, checkpoints, logger, metrics) -> None:  # noqa: ANN001
+    """Write a `manifest.json` into each partition directory the run produced."""
+    metrics.start_stage("manifest")
+    try:
+        paths = run_manifest_stage(
+            spark,
+            result,
+            cfg.manifest_output,
+            cfg.output,
+            checkpoints,
+            run_date=cfg.sql_params.get("run_date"),
+        )
+        metrics.lineage["manifest_files"] = paths
+        log(
+            logger,
+            "INFO",
+            "manifest.done",
+            partitions=len(paths),
+            checkpoint_from=checkpoints.checkpoint_from,
+            checkpoint_to=checkpoints.checkpoint_to,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if cfg.manifest_output.fail_on_error:
+            raise
+        log(logger, "WARNING", "manifest.soft_fail", error=str(exc))
+    finally:
+        metrics.end_stage("manifest")
 
 
 def _run_ttl(cfg, result, logger, metrics) -> None:  # noqa: ANN001
