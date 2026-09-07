@@ -1,8 +1,0 @@
-# Development environment overrides.
-environment: dev
-spark:
-  master: "local[*]"
-  conf:
-    spark.sql.shuffle.partitions: "8"
-logging:
-  level: DEBUG

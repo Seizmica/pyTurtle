@@ -1,26 +1,22 @@
 __pycache__/
 *.py[cod]
-*.egg-info/
 .pytest_cache/
 .ruff_cache/
-build/
-dist/
-output/
 .venv/
 venv/
 spark-warehouse/
+output/
 
-# Run artifacts (default audit.path and .aud checksum manifests)
-audit/
-*.aud
+# Local, uncommitted overrides. The committed .env.<environment> files hold
+# non-secret wiring only; real credentials come from the process environment.
+.env
+.env.local
+.env.*.local
 
 # Local snapshots / transfer archives
-proj.zip
 *.zip
 
-# Local environment + editor state
-.env
-.env.*
+# Editor / OS
 .idea/
 .vscode/
 .DS_Store

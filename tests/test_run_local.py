@@ -1,0 +1,153 @@
+"""End-to-end test of the runner against a local SparkSession.
+
+Requires a JDK. Skipped automatically when pyspark cannot start.
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+pyspark = pytest.importorskip("pyspark")
+
+from pyspark.sql import SparkSession
+
+from util.config import Settings
+from util.runner import Job, _key, run
+
+RUN_DATE = "2026-06-28"
+
+
+@pytest.fixture(scope="module")
+def spark():
+    # pyspark being installed does not mean a JVM is available; without a JDK
+    # getOrCreate raises JAVA_GATEWAY_EXITED. Skip rather than error, so
+    # `pytest tests` is green on a machine that only runs the non-Spark tests.
+    try:
+        session = (
+            SparkSession.builder.appName("etl-lite-test")
+            .master("local[1]")
+            .config("spark.sql.shuffle.partitions", "1")
+            .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+            .getOrCreate()
+        )
+    except Exception as exc:  # noqa: BLE001 - any startup failure means "no JVM here"
+        pytest.skip(f"Spark could not start, a JDK is required: {exc}")
+    yield session
+    session.stop()
+
+
+@pytest.fixture
+def settings(tmp_path, spark):
+    """Seed raw inputs and point RAW_ROOT / CURATED_ROOT at a temp dir."""
+    raw = tmp_path / "raw"
+    spark.createDataFrame(
+        [(1, "Ann", "gold"), (2, "Bob", "silver")],
+        ["customer_id", "name", "segment"],
+    ).write.parquet(str(raw / "customers"))
+    spark.createDataFrame(
+        [(1, 10.0, RUN_DATE), (1, 5.0, RUN_DATE), (2, 20.0, RUN_DATE)],
+        ["customer_id", "amount", "ordered_at"],
+    ).write.parquet(str(raw / "orders"))
+
+    return Settings(
+        environment="dev",
+        values={
+            "RAW_ROOT": str(raw),
+            "CURATED_ROOT": str(tmp_path / "curated"),
+            "APP_VERSION": "1.4.2",
+            "CHECKPOINT_FORMAT": "%Y%m%d%H%M%S",
+        },
+    )
+
+
+def _job(**overrides):
+    base = {
+        "name": "customer",
+        "sql": (
+            "SELECT c.customer_id, c.name, SUM(o.amount) AS total_spend, "
+            "'${run_date}' AS run_date "
+            "FROM customers c JOIN orders o ON c.customer_id = o.customer_id "
+            "GROUP BY c.customer_id, c.name"
+        ),
+        "inputs": {
+            "customers": "${RAW_ROOT}/customers/",
+            "orders": "${RAW_ROOT}/orders/",
+        },
+        "output": "${CURATED_ROOT}/customer/",
+        "partition_by": ["run_date"],
+        "manifest": True,
+    }
+    return Job(**{**base, **overrides})
+
+
+def _manifest(settings, run_date=RUN_DATE):
+    path = Path(settings.values["CURATED_ROOT"]) / "customer" / f"run_date={run_date}"
+    return json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_key_normalizes_every_uri_form():
+    """Regression: a listing URI and input_file_name() must key alike."""
+    assert _key("file:/tmp/part-0.parquet") == _key("file:///tmp/part-0.parquet")
+    assert _key("s3a://bucket/k/p.parquet") == "bucket/k/p.parquet"
+
+
+def test_read_sql_write(settings, spark):
+    metrics = run(_job(), settings, RUN_DATE, spark=spark)
+
+    assert metrics["output_rows"] == 2
+    assert metrics["input_rows"] == {"customers": 2, "orders": 3}
+
+    written = spark.read.parquet(metrics["target"]).orderBy("customer_id").collect()
+    assert [r["total_spend"] for r in written] == [15.0, 20.0]
+
+
+def test_dry_run_writes_nothing(settings, spark):
+    metrics = run(_job(), settings, RUN_DATE, dry_run=True, spark=spark)
+
+    assert metrics["output_rows"] == 2
+    assert not Path(settings.values["CURATED_ROOT"]).exists()
+
+
+def test_manifest_lands_in_the_partition_with_real_counts(settings, spark):
+    run(_job(), settings, RUN_DATE, spark=spark)
+
+    doc = _manifest(settings)
+    assert doc["run_date"] == RUN_DATE
+    assert doc["app_version"] == "1.4.2"
+    assert doc["row_count"] == 2
+    assert sum(s["row_count"] for s in doc["shards"]) == 2
+    assert [s["index"] for s in doc["shards"]] == list(range(len(doc["shards"])))
+    for shard in doc["shards"]:
+        assert Path(shard["uri"].replace("file:", "")).stat().st_size == shard["size_bytes"]
+    assert list(doc) == [
+        "run_date",
+        "checkpoint_from",
+        "checkpoint_to",
+        "row_count",
+        "app_version",
+        "shards",
+    ]
+
+
+def test_manifest_is_never_read_back_as_data(settings, spark):
+    """A rerun must not choke on the manifest.json already in the directory."""
+    run(_job(), settings, RUN_DATE, spark=spark)
+    run(_job(), settings, RUN_DATE, spark=spark)
+
+    doc = _manifest(settings)
+    assert doc["row_count"] == 2
+    assert all("manifest.json" not in s["uri"] for s in doc["shards"])
+
+
+def test_checkpoint_chains_across_runs(settings, spark):
+    run(_job(), settings, "2026-06-27", spark=spark)
+    first = _manifest(settings, "2026-06-27")
+    assert first["checkpoint_from"] is None  # no prior manifest
+
+    run(_job(), settings, RUN_DATE, spark=spark)
+    second = _manifest(settings)
+
+    assert second["checkpoint_from"] == first["checkpoint_to"]
+    # The earlier partition is left untouched by the later run.
+    assert _manifest(settings, "2026-06-27") == first

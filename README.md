@@ -1,186 +1,160 @@
-# etl-framework
+# etl-lite
 
-A **config-driven PySpark ETL framework**. Each job is declared entirely in
-config + SQL — no engine code changes needed to onboard a new pipeline.
+Project-specific PySpark jobs. **One script per data feed**, with its SQL
+inline, driven by a per-environment `.env` file.
 
-## Prerequisites: JDK
-
-PySpark runs on the JVM, so a Java runtime is required (Java 11 or 17 is
-recommended for Spark 3.4+). Without it you'll see
-`[JAVA_GATEWAY_EXITED] Java gateway process exited` when a job or the
-integration tests start.
-
-1. **Install a JDK** — e.g. [Eclipse Temurin 17](https://adoptium.net/) or
-   OpenJDK. On Windows: `winget install EclipseAdoptium.Temurin.17.JDK`.
-2. **Set `JAVA_HOME`** to the install dir and add its `bin` to `PATH`:
-
-   ```powershell
-   # Windows (PowerShell) — adjust the path to your install
-   setx JAVA_HOME "C:\Program Files\Eclipse Adoptium\jdk-17"
-   setx PATH "$env:PATH;%JAVA_HOME%\bin"
-   ```
-
-   ```bash
-   # macOS / Linux
-   export JAVA_HOME="$(/usr/libexec/java_home -v 17)"   # macOS
-   export PATH="$JAVA_HOME/bin:$PATH"
-   ```
-
-3. **Verify** in a new shell:
-
-   ```bash
-   java -version
-   ```
-
-## Install
-
-```bash
-pip install -e ".[dev]"
 ```
+jobs/
+  customer.py        one feed, its own SQL, its own declaration
+  orders.py
+util/
+  config.py          .env loading and ${VAR} resolution
+  runner.py          Spark session, read -> SQL -> write, manifest
+.env.dev  .env.uat  .env.preprod  .env.prod
+tests/
+```
+
+Two util files. Everything else is a job or a test.
 
 ## Run a job
 
 ```bash
-python -m etl_framework.main \
-  --config configs/jobs/customer_daily.yaml \
-  --env dev \
-  --run-date 2026-07-09 \
-  --dry-run false
+pip install ".[dev,delta]"
+
+python -m jobs.customer --env dev --run-date 2026-06-28 --dry-run
+python -m jobs.customer --env prod --run-date 2026-06-28
 ```
 
-Config is layered: `configs/base.yaml` → `configs/env/<env>.yaml` →
-`configs/jobs/<job>.yaml`, with `--param key=value` overrides applied last.
-`${ENV_VAR}` and `${ENV_VAR:-default}` interpolation is supported; never
-hardcode secrets.
+Run from the repo root — `jobs/` and `util/` are imported as namespace
+packages, which is why there is no `__init__.py` anywhere and why `-m` is used
+instead of `python jobs/customer.py`.
 
-## Execution flow
+`--env` is required unless `APP_ENV` is set. `--dry-run` reads the inputs, runs
+the SQL, prints the plan and the row count, and writes nothing.
 
-```
-load_config → validate → build_spark → read_inputs (temp views)
-  → pre/post data quality → spark.sql(transform) → write_output
-  → [optional] TTL/RDF stage → [optional] .aud checksum stage
-  → emit metrics + lineage
-```
+## Adding a feed
 
-## Incremental loads (Delta merge)
+Copy `jobs/customer.py`, change the SQL and the `Job(...)`. No other file
+changes.
 
-Set `output.mode: merge` (Delta only) with `merge_keys` to upsert instead of
-overwrite. The target table is created on first run, then matched rows are
-updated and new rows inserted:
+```python
+from util.runner import Job, main
 
-```yaml
-output:
-  path: "s3://curated/customer_daily/"
-  format: delta
-  mode: merge
-  merge_keys: [customer_id]
-```
+SQL = """
+SELECT product_id, SUM(qty) AS units, '${run_date}' AS run_date
+FROM shipments
+WHERE shipped_at >= '${run_date}'
+GROUP BY product_id
+"""
 
-## Data quality checks
+SHIPMENTS = Job(
+    name="shipments",
+    sql=SQL,
+    inputs={"shipments": "${RAW_ROOT}/shipments/"},
+    output="${CURATED_ROOT}/shipments/",
+    partition_by=["run_date"],
+    manifest=True,
+)
 
-Built-in check `type`s: `not_null`, `unique`, `row_count_min`, `referential`
-(child values must exist in a registered input view), and `custom` (a SQL
-predicate that must hold for every row):
-
-```yaml
-data_quality:
-  enabled: true
-  fail_on_error: true
-  checks:
-    - type: referential
-      columns: [customer_id]
-      ref_table: customers
-      ref_column: customer_id
-    - type: custom
-      name: non_negative_spend
-      expression: "total_spend >= 0"
+if __name__ == "__main__":
+    raise SystemExit(main(SHIPMENTS))
 ```
 
-## Output schema validation
+Input keys become the temp view names the SQL selects from. `${...}` tokens in
+paths and SQL resolve from `--run-date` first, then the `.env` file, then the
+process environment.
 
-Declare the expected output schema; the run fails before writing if a column
-is missing or has the wrong type (extra columns are allowed):
+### Job options
 
-```yaml
-output:
-  expected_schema:
-    customer_id: bigint
-    total_spend: double
-```
+| Field | Default | Notes |
+|-------|---------|-------|
+| `inputs` | required | `{view: path}`, or `{view: {path, format, options}}` |
+| `output` | required | Path template |
+| `format` | `parquet` | `parquet`, `delta`, `csv`, `json`, `orc` |
+| `mode` | `overwrite` | `append`, `overwrite`, or `merge` (Delta upsert) |
+| `partition_by` | `[]` | Hive-style partition columns |
+| `merge_keys` | `[]` | Required for `mode="merge"` |
+| `manifest` | `False` | Write `manifest.json` per partition |
 
-## Audit & reproducibility
+## Environments
 
-Enable per-run audit records (resolved config snapshot, SQL text, git commit,
-lineage, timings, row counts) written to `<path>/<job>/<run_id>.json`:
-
-```yaml
-audit:
-  enabled: true
-  path: audit
-```
-
-## Output checksums (`.aud`)
-
-Emit a `.aud` manifest holding an MD5 checksum for every file written, so
-consumers can verify the delivery:
-
-```yaml
-aud_output:
-  enabled: true
-  path: null            # defaults to "<output.path>.aud"
-  format: text          # text | json
-  include_hidden: false # include _SUCCESS, _delta_log/, .crc side-cars
-  fail_on_error: false  # soft-fail: a manifest error won't fail the run
-```
-
-The default `text` format is `md5sum`-compatible, with paths relative to the
-output directory:
-
-```
-d41d8cd98f00b204e9800998ecf8427e  run_date=2026-07-09/part-00000.parquet
-```
+One file per environment — `dev`, `uat`, `preprod`, `prod`. Nothing is
+inherited between them, so the effective value of a key is readable in one
+place.
 
 ```bash
-# verify a downloaded copy of the output
-cd /data/customer_daily && md5sum -c ../customer_daily.aud
+RAW_ROOT=s3a://raw-prod
+CURATED_ROOT=s3a://curated-prod
+SPARK_MASTER=yarn
+SPARK_CONF.spark.sql.shuffle.partitions=200
 ```
 
-Use `format: json` for a structured manifest (`target`, `algorithm`,
-`generated_at`, `file_count`, `files[]`). The manifest path is recorded in the
-run's lineage, so it also lands in the audit record.
+Any key prefixed `SPARK_CONF.` is passed to the session as a Spark conf, so
+tuning stays out of the code.
 
-## Performance: skip row counts
+**Secrets never go in these files.** A process environment variable overrides
+the same key from the file, so a secret manager or CI injects them at run time:
 
-Row-count metrics force full scans. Disable on large jobs:
-
-```yaml
-metrics:
-  row_counts: false
+```bash
+DB_PASSWORD=... python -m jobs.customer --env prod --run-date 2026-06-28
 ```
 
-## Add a pipeline
+Only keys the file declares can be overridden this way — an unrelated exported
+shell variable never leaks into the config.
 
-1. Write SQL in `sql/<job>.sql` (reference inputs by their `table` name).
-2. Create `configs/jobs/<job>.yaml` (inputs, output, optional `ttl_output`).
-3. Add data quality checks in the config.
-4. Add a test under `tests/integration/`.
-5. Do **not** modify `src/etl_framework/core/` for job-specific needs.
+## manifest.json
+
+With `manifest=True`, each partition directory the run produced gets:
+
+```json
+{
+  "run_date": "2026-06-28",
+  "checkpoint_from": 20260627150000,
+  "checkpoint_to": 20260628150000,
+  "row_count": 100,
+  "app_version": "0.1.0",
+  "shards": [
+    {"index": 0, "uri": "s3a://curated-prod/customer/run_date=2026-06-28/part-0.parquet",
+     "size_bytes": 41500000, "row_count": 20}
+  ]
+}
+```
+
+`checkpoint_from` is read from the newest prior partition's manifest;
+`checkpoint_to` is stamped from the run clock. The lookup happens **before the
+write**, because an overwrite would otherwise delete the very partitions the
+watermark is read from. Set `CHECKPOINT_FROM` in the environment to override it
+for a backfill.
+
+Two consequences worth knowing:
+
+- The manifest lives **inside** the data directory, so readers must glob for
+  data files — `.../run_date=2026-06-28/*.parquet` — not load the directory.
+  Spark auto-skips only files starting with `_` or `.`.
+- Row counts come from re-reading the output once, so `manifest=True` costs an
+  extra scan. Leave it off for feeds that don't need it.
+
+The shipped `.env` files set
+`spark.sql.sources.partitionOverwriteMode=dynamic` so a rerun replaces only the
+partitions it produces. Without it, a static overwrite wipes the whole table —
+including prior manifests, which breaks the checkpoint chain.
 
 ## Testing
 
 ```bash
-ruff check src/ && black --check src/
-pytest tests/unit -q
-pytest tests/integration -q   # spins up a local SparkSession
+ruff check jobs/ util/ tests/ && black --check jobs/ util/ tests/
+pytest tests -q
 ```
 
-## Layout
+`tests/test_run_local.py` needs a JDK (Java 11 or 17) and is skipped without
+one. The rest run anywhere.
 
-| Path | Purpose |
-|------|---------|
-| `src/etl_framework/config/` | Load, merge, interpolate, validate config |
-| `src/etl_framework/core/`   | session, reader, transformer, writer, pipeline |
-| `src/etl_framework/quality/`| Data quality expectations + validators |
-| `src/etl_framework/stages/` | Pluggable side-effect stages (TTL/RDF, `.aud` checksums) |
-| `src/etl_framework/observability/` | JSON logging + run metrics/lineage |
-| `src/etl_framework/utils/`  | retry, IO helpers |
+## Relationship to the full framework
+
+This branch is a deliberately reduced alternative to the config-driven
+framework on `main`. Dropped: YAML config layering, pydantic schema
+validation, the pluggable stage system, data quality gates, `.aud` checksums,
+TTL/RDF output, retries, audit records, and Nexus packaging. Kept: read → SQL →
+write, Delta merge, and the per-partition manifest.
+
+`main` still has all of it if you need a piece back.

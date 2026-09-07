@@ -1,6 +1,0 @@
-# Production environment overrides.
-environment: prod
-spark:
-  master: "yarn"
-logging:
-  level: WARNING

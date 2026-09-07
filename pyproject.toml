@@ -1,17 +1,13 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+# Not a distributable package — this repo is a set of job scripts you clone and
+# run. Only dependencies and tooling config live here.
 
 [project]
-name = "etl-framework"
+name = "etl-lite"
 version = "0.1.0"
-description = "Config-driven PySpark ETL framework"
+description = "Project-specific PySpark job scripts: one script per data feed"
 requires-python = ">=3.10"
 dependencies = [
     "pyspark>=3.4",
-    "pyyaml>=6.0",
-    "pydantic>=2.5",
-    "rdflib>=7.0",
 ]
 
 [project.optional-dependencies]
@@ -24,12 +20,6 @@ delta = [
     "delta-spark>=2.4",
 ]
 
-[project.scripts]
-etl-run = "etl_framework.main:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
 [tool.black]
 line-length = 100
 target-version = ["py310"]
@@ -39,6 +29,10 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint.per-file-ignores]
-# Integration tests call pytest.importorskip before importing Spark/Delta,
-# so module-level imports intentionally follow executable statements.
-"tests/integration/*" = ["E402"]
+# pytest.importorskip("pyspark") must run before the pyspark import, so
+# module-level imports intentionally follow an executable statement.
+"tests/test_run_local.py" = ["E402"]
+
+[tool.pytest.ini_options]
+# jobs/ and util/ are namespace packages imported from the repo root.
+pythonpath = ["."]
