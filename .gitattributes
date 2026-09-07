@@ -1,0 +1,6 @@
+# Normalize text files in the repository.
+* text=auto
+
+# Shell scripts must keep LF endings: bin/run.sh is the bundle entry point and
+# runs on Linux clusters, where a CRLF shebang fails with "bad interpreter".
+*.sh text eol=lf

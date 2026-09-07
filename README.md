@@ -174,6 +174,104 @@ pytest tests/unit -q
 pytest tests/integration -q   # spins up a local SparkSession
 ```
 
+## Releasing to Nexus
+
+Versions come from git tags via `setuptools-scm` — there is no version string to
+bump by hand. Tag `v1.2.3` builds `1.2.3`; any untagged commit builds a
+developmental version (`1.2.4.dev5`) that routes to the snapshot repository.
+
+Two artifacts are published per version:
+
+| Artifact | Destination | Why |
+|----------|-------------|-----|
+| `etl_framework-<ver>-py3-none-any.whl` | hosted PyPI repo | the engine, `pip install`-able |
+| `etl-framework-<ver>.zip` | raw repo, under `<raw_path>/<ver>/` | wheel **+** `configs/` + `sql/` + pinned `requirements.lock` |
+
+The bundle exists because a wheel alone is not deployable: `--config` is a
+filesystem path and `sql_file` is read from disk, so neither `configs/` nor
+`sql/` is importable from the wheel. Shipping them under one version means
+"prod is on 1.2.3" describes the engine *and* the SQL that ran.
+
+### Configuring Nexus
+
+Edit `[tool.nexus]` in `pyproject.toml`, or override any field per environment:
+
+| `pyproject.toml` | Environment variable |
+|------------------|----------------------|
+| `url` | `NEXUS_URL` |
+| `pypi_repository` | `NEXUS_PYPI_REPOSITORY` |
+| `pypi_snapshot_repository` | `NEXUS_PYPI_SNAPSHOT_REPOSITORY` |
+| `raw_repository` | `NEXUS_RAW_REPOSITORY` |
+| `raw_path` | `NEXUS_RAW_PATH` |
+
+Credentials are environment-only and never read from a file:
+`NEXUS_USERNAME` / `NEXUS_PASSWORD`.
+
+### CI
+
+`.github/workflows/ci.yml` runs `test` → `package` → `publish`. The `package`
+job builds and validates the artifacts on every push and PR (so packaging
+breakage surfaces before release) and uploads nothing. The `publish` job runs
+only on pushes to the default branch and on `v*` tags, and is skipped entirely
+until the `NEXUS_URL` repository variable is set.
+
+Set these in **Settings → Secrets and variables → Actions**: repository
+*variables* `NEXUS_URL`, `NEXUS_PYPI_REPOSITORY`, `NEXUS_PYPI_SNAPSHOT_REPOSITORY`,
+`NEXUS_RAW_REPOSITORY`, `NEXUS_RAW_PATH`; repository *secrets* `NEXUS_USERNAME`,
+`NEXUS_PASSWORD` (a deploy service account, not a personal token).
+
+To cut a release:
+
+```bash
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+### Building and publishing by hand
+
+```bash
+pip install ".[release]"
+python -m build                                              # wheel + sdist
+python scripts/build_bundle.py --wheel dist/*.whl            # bundle zip + .sha256
+python scripts/publish_nexus.py --dist dist --dry-run        # show the plan
+python scripts/publish_nexus.py --dist dist                  # upload
+```
+
+## Deploying a release
+
+**Install the engine** from the Nexus index (use a *group* repo so third-party
+dependencies resolve through the same index):
+
+```bash
+pip install "etl-framework==1.2.3" --index-url https://nexus.example.com/repository/pypi-group/simple
+```
+
+**Or unpack the bundle** into a versioned directory and flip a symlink, so a
+rollback is one `ln -sfn`:
+
+```bash
+curl -fO https://nexus.example.com/repository/raw-hosted/etl-framework/1.2.3/etl-framework-1.2.3.zip
+sha256sum -c etl-framework-1.2.3.zip.sha256
+unzip -q etl-framework-1.2.3.zip -d /opt/etl/releases/
+ln -sfn /opt/etl/releases/etl-framework-1.2.3 /opt/etl/current
+pip install /opt/etl/current/wheels/*.whl
+```
+
+Then schedule against a pinned version — never `current` — so a rollback does
+not silently change what a scheduled run executes:
+
+```bash
+/opt/etl/releases/etl-framework-1.2.3/bin/run.sh \
+  --config configs/jobs/customer_daily.yaml --env prod --run-date 2026-06-28
+```
+
+`run.sh` cd's to the release root first, so the relative `configs/` and `sql/`
+paths in a job config resolve.
+
+On a YARN cluster where executors have no `pip`, build a relocatable virtualenv
+with `venv-pack` from `requirements.lock` and ship it with
+`spark-submit --archives venv.tar.gz#env --conf spark.pyspark.python=./env/bin/python`.
+`--py-files <wheel>` ships only the framework code, not its dependencies.
+
 ## Layout
 
 | Path | Purpose |

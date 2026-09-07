@@ -1,10 +1,11 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "etl-framework"
-version = "0.1.0"
+# Derived from the git tag by setuptools-scm — see [tool.setuptools_scm].
+dynamic = ["version"]
 description = "Config-driven PySpark ETL framework"
 requires-python = ">=3.10"
 dependencies = [
@@ -23,12 +24,36 @@ dev = [
 delta = [
     "delta-spark>=2.4",
 ]
+# Tooling for `python -m build` + scripts/publish_nexus.py.
+release = [
+    "build>=1.0",
+    "twine>=5.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
 
 [project.scripts]
 etl-run = "etl_framework.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Version comes from the git tag: `v1.2.3` -> 1.2.3. An untagged commit builds
+# as a developmental version (1.2.4.dev5) that routes to the snapshot repo.
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+# Nexus rejects PEP 440 local versions (+g<sha>), so they are stripped.
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
+
+# Where CI publishes artifacts. Every field is overridable per environment with
+# the matching NEXUS_* variable, so this file never needs editing in a
+# pipeline. Credentials are environment-only: NEXUS_USERNAME / NEXUS_PASSWORD.
+[tool.nexus]
+url = "https://nexus.example.com"          # $NEXUS_URL
+pypi_repository = "pypi-hosted"            # $NEXUS_PYPI_REPOSITORY — tagged releases
+pypi_snapshot_repository = "pypi-snapshots"  # $NEXUS_PYPI_SNAPSHOT_REPOSITORY — .dev builds
+raw_repository = "raw-hosted"              # $NEXUS_RAW_REPOSITORY — job bundles
+raw_path = "etl-framework"                 # $NEXUS_RAW_PATH — prefix inside the raw repo
 
 [tool.black]
 line-length = 100

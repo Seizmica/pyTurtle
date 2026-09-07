@@ -6,6 +6,10 @@ __pycache__/
 build/
 dist/
 output/
+# Generated per build in CI from a clean resolve of the wheel.
+requirements.lock
+# Written by setuptools-scm at build time.
+src/etl_framework/_version.py
 .venv/
 venv/
 spark-warehouse/

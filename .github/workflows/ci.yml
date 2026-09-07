@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -15,6 +16,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # setuptools-scm derives the version from tags, which a shallow
+          # checkout does not fetch.
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -34,10 +39,10 @@ jobs:
           pip install -e ".[dev,delta]"
 
       - name: Lint (ruff)
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ scripts/
 
       - name: Format check (black)
-        run: black --check src/ tests/
+        run: black --check src/ tests/ scripts/
 
       - name: Unit tests
         run: pytest tests/unit -q
@@ -46,3 +51,121 @@ jobs:
         env:
           JAVA_HOME: ${{ env.JAVA_HOME }}
         run: pytest tests/integration -q
+
+  # Builds the artifacts on every push and PR, so packaging breakage surfaces
+  # here rather than at release time. Uploads nothing to Nexus.
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install release tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[release]"
+
+      - name: Build wheel and sdist
+        id: build
+        run: |
+          python -m build
+          VERSION=$(ls dist/*.whl | head -1 | sed -E 's/.*-([^-]+)-py3.*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Built version $VERSION"
+
+      - name: Pin runtime dependencies
+        # Resolve the wheel in a clean venv so the lock reflects exactly what a
+        # deploy installs — not the build environment's dev tooling.
+        run: |
+          python -m venv /tmp/lockenv
+          /tmp/lockenv/bin/pip install --quiet --upgrade pip
+          /tmp/lockenv/bin/pip install --quiet dist/*.whl
+          /tmp/lockenv/bin/pip freeze --exclude-editable > requirements.lock
+          echo "Pinned $(wc -l < requirements.lock) packages"
+
+      - name: Build job bundle
+        run: python scripts/build_bundle.py --wheel "$(ls dist/*.whl | head -1)"
+
+      - name: Verify the bundle is deployable
+        # A bundle missing configs/ or sql/ installs fine and fails at runtime,
+        # so assert the payload is present before it can ever be published.
+        run: |
+          python - <<'EOF'
+          import json, sys, zipfile, glob
+          path = glob.glob("dist/etl-framework-*.zip")[0]
+          with zipfile.ZipFile(path) as zf:
+              names = zf.namelist()
+              manifest = json.loads(zf.read([n for n in names if n.endswith("MANIFEST.json")][0]))
+          required = ["configs/base.yaml", "configs/jobs/customer_daily.yaml",
+                      "sql/customer_daily.sql", "bin/run.sh", "requirements.lock"]
+          missing = [r for r in required if not any(n.endswith(r) for n in names)]
+          if missing:
+              sys.exit(f"Bundle is missing: {missing}")
+          if not any(n.endswith(".whl") for n in names):
+              sys.exit("Bundle contains no wheel")
+          print(f"{path}: {len(names)} entries, version {manifest['version']}, "
+                f"commit {manifest['git_commit']}")
+          EOF
+
+      - name: Show publish plan
+        # Dry run against the configured Nexus; needs no credentials.
+        run: python scripts/publish_nexus.py --dist dist --dry-run
+
+      - name: Stage the lock file with the artifacts
+        run: cp requirements.lock dist/requirements.lock
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: etl-framework-${{ steps.build.outputs.version }}
+          # Only dist/* so the archive root is dist/, and downloading it back
+          # into `dist` reproduces the same layout.
+          path: dist/
+          retention-days: 14
+
+  # Publishes to Nexus. Tagged builds (v1.2.3) go to the release repositories;
+  # pushes to the default branch publish .dev snapshots.
+  publish:
+    needs: package
+    # Skipped until NEXUS_URL is set as a repository variable, so CI stays
+    # green before Nexus is wired up.
+    if: github.event_name == 'push' && vars.NEXUS_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: etl-framework-${{ needs.package.outputs.version }}
+          path: dist
+
+      - name: Install release tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[release]"
+
+      - name: Publish to Nexus
+        env:
+          NEXUS_URL: ${{ vars.NEXUS_URL }}
+          NEXUS_PYPI_REPOSITORY: ${{ vars.NEXUS_PYPI_REPOSITORY }}
+          NEXUS_PYPI_SNAPSHOT_REPOSITORY: ${{ vars.NEXUS_PYPI_SNAPSHOT_REPOSITORY }}
+          NEXUS_RAW_REPOSITORY: ${{ vars.NEXUS_RAW_REPOSITORY }}
+          NEXUS_RAW_PATH: ${{ vars.NEXUS_RAW_PATH }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: python scripts/publish_nexus.py --dist dist
