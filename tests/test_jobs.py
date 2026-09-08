@@ -41,8 +41,10 @@ def test_shipped_jobs_resolve_against_every_environment(job):
         settings.resolve(job.output, **params)
         settings.resolve(job.sql, **params)
         for source in job.inputs.values():
-            path = source["path"] if isinstance(source, dict) else source
-            settings.resolve(path, **params)
+            spec = source if isinstance(source, dict) else {"path": source}
+            # Whichever kind it is, its template must resolve in this environment
+            # — a table name carries ${HIVE_DB} just as a path carries ${RAW_ROOT}.
+            settings.resolve(spec.get("path") or spec["table"], **params)
 
 
 def test_merge_requires_delta():
@@ -63,6 +65,48 @@ def test_unknown_mode_is_rejected():
 def test_inputs_are_required():
     with pytest.raises(ConfigError, match="at least one input"):
         _job(inputs={}).validate()
+
+
+# --- mixed sources: HDFS files and Hive tables ---------------------------
+
+
+def test_a_table_input_is_accepted():
+    _job(inputs={"customers": {"table": "analytics.customers"}}).validate()
+
+
+def test_files_and_tables_can_be_mixed_in_one_job():
+    job = _job(
+        inputs={
+            "customers": {"table": "${HIVE_DB}.customers"},
+            "orders": "hdfs://nn/raw/orders/",
+        }
+    )
+    job.validate()
+    assert job.reads_hive() is True
+
+
+def test_a_file_only_job_does_not_request_hive():
+    assert _job(inputs={"orders": "hdfs://nn/raw/orders/"}).reads_hive() is False
+
+
+def test_a_source_needs_exactly_one_of_path_or_table():
+    with pytest.raises(ConfigError, match="exactly one of 'path' or 'table'"):
+        _job(inputs={"x": {"path": "/a", "table": "db.t"}}).validate()
+
+    with pytest.raises(ConfigError, match="exactly one of 'path' or 'table'"):
+        _job(inputs={"x": {"format": "parquet"}}).validate()
+
+
+def test_format_and_options_are_rejected_on_a_table():
+    """The metastore describes a table; a read format would be silently ignored."""
+    with pytest.raises(ConfigError, match="'format' and 'options' do not apply"):
+        _job(inputs={"x": {"table": "db.t", "format": "parquet"}}).validate()
+
+
+def test_customer_reads_a_hive_table_and_hdfs_files():
+    assert CUSTOMER.reads_hive() is True
+    assert CUSTOMER.inputs["customers"] == {"table": "${HIVE_DB}.customers"}
+    assert "path" in CUSTOMER.inputs["orders"]
 
 
 def test_customer_writes_a_partitioned_manifest():

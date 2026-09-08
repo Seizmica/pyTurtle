@@ -61,14 +61,49 @@ if __name__ == "__main__":
 ```
 
 Input keys become the temp view names the SQL selects from. `${...}` tokens in
-paths and SQL resolve from `--run-date` first, then the `.env` file, then the
-process environment.
+paths, table names, and SQL resolve from `--run-date` first, then the `.env`
+file, then the process environment.
+
+### Inputs: files and Hive tables
+
+An input is either a **file source** or a **metastore table**. A job can mix
+both — `jobs/customer.py` joins a Hive table to parquet files on HDFS.
+
+```python
+inputs={
+    # Hive table — the metastore knows its location and format.
+    "customers": {"table": "${HIVE_DB}.customers"},
+
+    # Files — any scheme Hadoop understands, hdfs:// included.
+    "orders": {
+        "path": "hdfs://nn/raw/orders/",
+        "format": "parquet",
+        "options": {"mergeSchema": "true"},
+    },
+
+    # Shorthand: a bare string is a path using the job's input_format.
+    "returns": "${RAW_ROOT}/returns/",
+}
+```
+
+Each entry needs **exactly one** of `path` or `table`; declaring both, or
+neither, fails validation before Spark starts. `format` and `options` apply
+only to file sources — passing them alongside `table` is rejected rather than
+silently ignored, since the metastore already describes the table.
+
+A job with any table input gets `enableHiveSupport()` automatically. The
+metastore connection itself comes from the cluster's `hive-site.xml`; set
+`SPARK_CONF.hive.metastore.uris` in the `.env` file only when it doesn't.
+
+Partition pruning still works on table inputs: filters in the job's SQL push
+down through the temp view into the table scan, so a `WHERE` on a partition
+column does not read the whole table.
 
 ### Job options
 
 | Field | Default | Notes |
 |-------|---------|-------|
-| `inputs` | required | `{view: path}`, or `{view: {path, format, options}}` |
+| `inputs` | required | `{view: path}`, `{view: {path, format, options}}`, or `{view: {table}}` |
 | `output` | required | Path template |
 | `format` | `parquet` | `parquet`, `delta`, `csv`, `json`, `orc` |
 | `mode` | `overwrite` | `append`, `overwrite`, or `merge` (Delta upsert) |
@@ -85,6 +120,7 @@ place.
 ```bash
 RAW_ROOT=s3a://raw-prod
 CURATED_ROOT=s3a://curated-prod
+HIVE_DB=analytics_prod
 SPARK_MASTER=yarn
 SPARK_CONF.spark.sql.shuffle.partitions=200
 ```

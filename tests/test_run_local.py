@@ -19,16 +19,18 @@ RUN_DATE = "2026-06-28"
 
 
 @pytest.fixture(scope="module")
-def spark():
+def spark(tmp_path_factory):
     # pyspark being installed does not mean a JVM is available; without a JDK
     # getOrCreate raises JAVA_GATEWAY_EXITED. Skip rather than error, so
     # `pytest tests` is green on a machine that only runs the non-Spark tests.
+    warehouse = tmp_path_factory.mktemp("warehouse")
     try:
         session = (
             SparkSession.builder.appName("etl-lite-test")
             .master("local[1]")
             .config("spark.sql.shuffle.partitions", "1")
             .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+            .config("spark.sql.warehouse.dir", str(warehouse))
             .getOrCreate()
         )
     except Exception as exc:  # noqa: BLE001 - any startup failure means "no JVM here"
@@ -98,6 +100,27 @@ def test_read_sql_write(settings, spark):
     assert metrics["output_rows"] == 2
     assert metrics["input_rows"] == {"customers": 2, "orders": 3}
 
+    written = spark.read.parquet(metrics["target"]).orderBy("customer_id").collect()
+    assert [r["total_spend"] for r in written] == [15.0, 20.0]
+
+
+def test_catalog_table_input_joined_to_file_input(settings, spark):
+    """The real shape: one input from the metastore, one from files on HDFS."""
+    spark.createDataFrame(
+        [(1, "Ann", "gold"), (2, "Bob", "silver")],
+        ["customer_id", "name", "segment"],
+    ).write.mode("overwrite").saveAsTable("customers_tbl")
+
+    job = _job(
+        inputs={
+            "customers": {"table": "customers_tbl"},
+            "orders": "${RAW_ROOT}/orders/",
+        }
+    )
+    metrics = run(job, settings, RUN_DATE, spark=spark)
+
+    assert metrics["input_rows"] == {"customers": 2, "orders": 3}
+    assert metrics["output_rows"] == 2
     written = spark.read.parquet(metrics["target"]).orderBy("customer_id").collect()
     assert [r["total_spend"] for r in written] == [15.0, 20.0]
 

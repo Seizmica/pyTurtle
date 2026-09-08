@@ -30,7 +30,9 @@ CUSTOMER = Job(
     name="customer",
     sql=SQL,
     inputs={
-        "customers": "${RAW_ROOT}/customers/",
+        # A Hive metastore table: the catalog knows its location and format.
+        "customers": {"table": "${HIVE_DB}.customers"},
+        # Files on HDFS: read with the DataFrameReader.
         "orders": {
             "path": "${RAW_ROOT}/orders/",
             "format": "parquet",

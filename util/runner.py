@@ -44,7 +44,8 @@ class Job:
 
     name: str
     sql: str
-    # View name -> path template, or a dict with `path`, `format`, `options`.
+    # View name -> source. A bare string is a path. A dict is either a file
+    # source ({"path", "format", "options"}) or a Hive table ({"table"}).
     inputs: dict[str, Any]
     output: str
     format: str = "parquet"
@@ -68,6 +69,24 @@ class Job:
                 raise ConfigError(f"{self.name}: mode 'merge' requires merge_keys")
         if not self.inputs:
             raise ConfigError(f"{self.name}: at least one input is required")
+
+        for view, source in self.inputs.items():
+            spec = _spec(source)
+            has_path, has_table = "path" in spec, "table" in spec
+            if has_path == has_table:
+                raise ConfigError(
+                    f"{self.name}: input '{view}' needs exactly one of 'path' or 'table', "
+                    f"got {sorted(spec) or 'nothing'}"
+                )
+            if has_table and ("format" in spec or "options" in spec):
+                raise ConfigError(
+                    f"{self.name}: input '{view}' is a table, so 'format' and 'options' "
+                    "do not apply - the metastore describes it"
+                )
+
+    def reads_hive(self) -> bool:
+        """Whether any input is a metastore table, so the session needs Hive."""
+        return any("table" in _spec(source) for source in self.inputs.values())
 
 
 # --------------------------------------------------------------------------
@@ -96,11 +115,51 @@ def build_spark(job: Job, settings: Settings) -> SparkSession:
     for key, value in conf.items():
         builder = builder.config(key, value)
 
+    if job.reads_hive():
+        # The metastore itself is configured by the cluster's hive-site.xml, or
+        # by SPARK_CONF.hive.metastore.uris in the .env file.
+        builder = builder.enableHiveSupport()
+
     return builder.getOrCreate()
 
 
+def _spec(source: Any) -> dict[str, Any]:
+    """Normalize an input entry: a bare string is a path."""
+    return source if isinstance(source, dict) else {"path": source}
+
+
 def _fmt(source: Any, job: Job) -> str:
-    return source.get("format", job.input_format) if isinstance(source, dict) else job.input_format
+    """Read format for a *file* source. Meaningless for a table."""
+    spec = _spec(source)
+    if "table" in spec:
+        return "hive"
+    return spec.get("format", job.input_format)
+
+
+def load_source(
+    spark: SparkSession, job: Job, settings: Settings, source: Any, **params: object
+) -> tuple[DataFrame, str]:
+    """Load one input. Returns the DataFrame and a loggable description.
+
+    Two kinds of source:
+
+    * ``{"table": "db.name"}`` — read through the metastore with
+      ``spark.table``. Partition pruning still happens: the job's SQL filters
+      are pushed down through the temp view into the table scan.
+    * ``{"path": ...}`` or a bare string — read files with the DataFrameReader.
+      Any scheme Hadoop understands works, ``hdfs://`` included.
+    """
+    spec = _spec(source)
+
+    if "table" in spec:
+        table = settings.resolve(spec["table"], **params)
+        return spark.table(table), f"table {table}"
+
+    path = settings.resolve(spec["path"], **params)
+    reader = spark.read.format(_fmt(source, job))
+    for key, value in (spec.get("options") or {}).items():
+        reader = reader.option(key, value)
+    return reader.load(path), path
 
 
 def read_inputs(
@@ -109,15 +168,10 @@ def read_inputs(
     """Register every input as a temp view named by its key. Returns row counts."""
     counts: dict[str, int] = {}
     for view, source in job.inputs.items():
-        spec = source if isinstance(source, dict) else {"path": source}
-        path = settings.resolve(spec["path"], **params)
-        reader = spark.read.format(_fmt(source, job))
-        for key, value in (spec.get("options") or {}).items():
-            reader = reader.option(key, value)
-        df = reader.load(path)
+        df, described = load_source(spark, job, settings, source, **params)
         df.createOrReplaceTempView(view)
         counts[view] = df.count()
-        log.info("read %-16s %-9s rows=%-9s %s", view, _fmt(source, job), counts[view], path)
+        log.info("read %-16s %-9s rows=%-9s %s", view, _fmt(source, job), counts[view], described)
     return counts
 
 
