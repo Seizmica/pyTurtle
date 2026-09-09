@@ -9,7 +9,7 @@ arriving correction updates the existing row instead of duplicating it.
 Owner: data-eng@company.com
 """
 
-from util.runner import Job, main
+from util.runner import Job, Output, main
 
 SQL = """
 SELECT
@@ -28,11 +28,15 @@ ORDERS = Job(
     name="orders",
     sql=SQL,
     inputs={"orders": "${RAW_ROOT}/orders/"},
-    output="${CURATED_ROOT}/orders/",
-    format="delta",
-    mode="merge",
-    merge_keys=["order_id"],
-    partition_by=["run_date"],
+    outputs=[
+        Output(
+            path="${CURATED_ROOT}/orders/",
+            format="delta",
+            mode="merge",
+            merge_keys=["order_id"],
+            partition_by=["run_date"],
+        ),
+    ],
 )
 
 

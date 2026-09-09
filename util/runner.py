@@ -38,6 +38,48 @@ _LOOKBACK_PARTITIONS = 32
 _SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/+")
 
 
+#: Output formats a job may declare. ``delta`` exists for incremental
+#: ``mode="merge"`` loads; ``parquet`` and ``csv`` are the plain formats.
+OUTPUT_FORMATS = ("parquet", "csv", "delta")
+
+
+@dataclass
+class Output:
+    """One destination for the result.
+
+    A job may declare several. The common case is a parquet copy for
+    downstream jobs plus a csv copy for a hand-off, each with its own path,
+    options, and partitioning.
+    """
+
+    path: str
+    format: str = "parquet"
+    # append | overwrite | merge  (merge is delta-only, upsert on merge_keys)
+    mode: str = "overwrite"
+    partition_by: list[str] = field(default_factory=list)
+    merge_keys: list[str] = field(default_factory=list)
+    # Writer options: `compression` for parquet, `header`/`sep` for csv.
+    options: dict[str, str] = field(default_factory=dict)
+    # Write a manifest.json into each partition directory this run produced.
+    manifest: bool = False
+
+    def validate(self, job_name: str) -> None:
+        if self.format not in OUTPUT_FORMATS:
+            raise ConfigError(
+                f"{job_name}: output format must be one of {', '.join(OUTPUT_FORMATS)}, "
+                f"got {self.format!r}"
+            )
+        if self.mode not in ("append", "overwrite", "merge"):
+            raise ConfigError(f"{job_name}: mode must be append, overwrite, or merge")
+        if self.mode == "merge":
+            if self.format != "delta":
+                raise ConfigError(f"{job_name}: mode 'merge' requires format 'delta'")
+            if not self.merge_keys:
+                raise ConfigError(f"{job_name}: mode 'merge' requires merge_keys")
+        if not self.path:
+            raise ConfigError(f"{job_name}: every output needs a path")
+
+
 @dataclass
 class Job:
     """One data feed. Declared at the top of its own script."""
@@ -47,28 +89,27 @@ class Job:
     # View name -> source. A bare string is a path. A dict is either a file
     # source ({"path", "format", "options"}) or a Hive table ({"table"}).
     inputs: dict[str, Any]
-    output: str
-    format: str = "parquet"
-    # append | overwrite | merge  (merge is delta-only, upsert on merge_keys)
-    mode: str = "overwrite"
-    partition_by: list[str] = field(default_factory=list)
-    merge_keys: list[str] = field(default_factory=list)
-    options: dict[str, str] = field(default_factory=dict)
+    # One or more destinations. Several formats of the same result are written
+    # from one cached DataFrame, so the SQL runs once.
+    outputs: list[Output] = field(default_factory=list)
     input_format: str = "parquet"
-    # Write a manifest.json into each partition directory this run produced.
-    manifest: bool = False
 
     def validate(self) -> None:
         """Fail before Spark starts, not halfway through a write."""
-        if self.mode not in ("append", "overwrite", "merge"):
-            raise ConfigError(f"{self.name}: mode must be append, overwrite, or merge")
-        if self.mode == "merge":
-            if self.format != "delta":
-                raise ConfigError(f"{self.name}: mode 'merge' requires format 'delta'")
-            if not self.merge_keys:
-                raise ConfigError(f"{self.name}: mode 'merge' requires merge_keys")
         if not self.inputs:
             raise ConfigError(f"{self.name}: at least one input is required")
+        if not self.outputs:
+            raise ConfigError(f"{self.name}: at least one output is required")
+
+        for output in self.outputs:
+            output.validate(self.name)
+
+        paths = [o.path for o in self.outputs]
+        duplicates = {p for p in paths if paths.count(p) > 1}
+        if duplicates:
+            raise ConfigError(
+                f"{self.name}: outputs must have distinct paths, {sorted(duplicates)} repeated"
+            )
 
         for view, source in self.inputs.items():
             spec = _spec(source)
@@ -88,6 +129,11 @@ class Job:
         """Whether any input is a metastore table, so the session needs Hive."""
         return any("table" in _spec(source) for source in self.inputs.values())
 
+    def uses_delta(self) -> bool:
+        return any(o.format == "delta" for o in self.outputs) or any(
+            _spec(s).get("format") == "delta" for s in self.inputs.values()
+        )
+
 
 # --------------------------------------------------------------------------
 # Spark
@@ -106,7 +152,7 @@ def build_spark(job: Job, settings: Settings) -> SparkSession:
         builder = builder.master(master)
 
     conf = settings.prefixed("SPARK_CONF.")
-    if job.format == "delta" or any(_fmt(src, job) == "delta" for src in job.inputs.values()):
+    if job.uses_delta():
         conf.setdefault("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         conf.setdefault(
             "spark.sql.catalog.spark_catalog",
@@ -180,33 +226,33 @@ def read_inputs(
 # --------------------------------------------------------------------------
 
 
-def write(df: DataFrame, job: Job, output_path: str) -> None:
-    """Write per the job's format and mode. ``merge`` upserts into Delta."""
-    if job.mode == "merge":
-        _merge(df, job, output_path)
+def write(df: DataFrame, output: Output, output_path: str) -> None:
+    """Write one output per its format and mode. ``merge`` upserts into Delta."""
+    if output.mode == "merge":
+        _merge(df, output, output_path)
         return
 
-    writer = df.write.format(job.format).mode(job.mode)
-    if job.partition_by:
-        writer = writer.partitionBy(*job.partition_by)
-    for key, value in job.options.items():
+    writer = df.write.format(output.format).mode(output.mode)
+    if output.partition_by:
+        writer = writer.partitionBy(*output.partition_by)
+    for key, value in output.options.items():
         writer = writer.option(key, value)
     writer.save(output_path)
 
 
-def _merge(df: DataFrame, job: Job, output_path: str) -> None:
+def _merge(df: DataFrame, output: Output, output_path: str) -> None:
     """Upsert on ``merge_keys``; create the table on first run."""
     from delta.tables import DeltaTable
 
     spark = df.sparkSession
     if not DeltaTable.isDeltaTable(spark, output_path):
         writer = df.write.format("delta").mode("overwrite")
-        if job.partition_by:
-            writer = writer.partitionBy(*job.partition_by)
+        if output.partition_by:
+            writer = writer.partitionBy(*output.partition_by)
         writer.save(output_path)
         return
 
-    condition = " AND ".join(f"t.{k} = s.{k}" for k in job.merge_keys)
+    condition = " AND ".join(f"t.{k} = s.{k}" for k in output.merge_keys)
     (
         DeltaTable.forPath(spark, output_path)
         .alias("t")
@@ -288,7 +334,7 @@ def _subdirs(spark: SparkSession, directory: str) -> list[str]:
 
 
 def previous_checkpoint(
-    spark: SparkSession, job: Job, output_path: str, settings: Settings
+    spark: SparkSession, output: Output, output_path: str, settings: Settings
 ) -> int | None:
     """Highest ``checkpoint_to`` in an existing partition's manifest.
 
@@ -302,7 +348,7 @@ def previous_checkpoint(
 
     best: int | None = None
     try:
-        dirs = _subdirs(spark, output_path) if job.partition_by else [output_path]
+        dirs = _subdirs(spark, output_path) if output.partition_by else [output_path]
         for directory in sorted(dirs, reverse=True)[:_LOOKBACK_PARTITIONS]:
             raw = _read_text(spark, f"{directory.rstrip('/')}/{MANIFEST_NAME}")
             if not raw:
@@ -318,7 +364,7 @@ def previous_checkpoint(
 def write_manifests(
     spark: SparkSession,
     df: DataFrame,
-    job: Job,
+    output: Output,
     output_path: str,
     checkpoint_from: int | None,
     checkpoint_to: int,
@@ -328,12 +374,13 @@ def write_manifests(
     """Write ``manifest.json`` into each partition directory this run produced."""
     app_version = settings.get("APP_VERSION", "0.0.0")
 
-    if job.partition_by:
-        rows = df.select(*job.partition_by).distinct().collect()
+    if output.partition_by:
+        rows = df.select(*output.partition_by).distinct().collect()
         targets = [
             (
-                f"{output_path.rstrip('/')}/" + "/".join(f"{c}={row[c]}" for c in job.partition_by),
-                str(row[job.partition_by[0]]),
+                f"{output_path.rstrip('/')}/"
+                + "/".join(f"{c}={row[c]}" for c in output.partition_by),
+                str(row[output.partition_by[0]]),
             )
             for row in rows
         ]
@@ -347,7 +394,7 @@ def write_manifests(
             log.warning("no files under %s - skipping its manifest", directory)
             continue
 
-        counts = _row_counts(spark, job, output_path, [uri for _, uri, _ in files])
+        counts = _row_counts(spark, output, output_path, [uri for _, uri, _ in files])
         shards = [
             {
                 "index": index,
@@ -358,7 +405,7 @@ def write_manifests(
             for index, (_, uri, size) in enumerate(files)
         ]
         document = {
-            "run_date": partition_value if job.partition_by else run_date,
+            "run_date": partition_value if output.partition_by else run_date,
             "checkpoint_from": checkpoint_from,
             "checkpoint_to": checkpoint_to,
             "row_count": sum(s["row_count"] for s in shards),
@@ -372,17 +419,27 @@ def write_manifests(
     return written
 
 
-def _row_counts(spark: SparkSession, job: Job, output_path: str, uris: list[str]) -> dict[str, int]:
+def _row_counts(
+    spark: SparkSession, output: Output, output_path: str, uris: list[str]
+) -> dict[str, int]:
     """Exact rows per file, from one re-read of what was just written.
 
     Non-Delta formats are read as an explicit file list rather than as a
     directory, so a manifest.json left by an earlier run is never parsed as
     data.
+
+    The write options are replayed on the reader. That matters for csv: reading
+    a ``header=true`` file without the option counts the header line as a data
+    row, inflating every shard by one. Parquet ignores the options it does not
+    recognise (``compression`` is write-only), so this is safe for both.
     """
     from pyspark.sql.functions import input_file_name
 
-    reader = spark.read.format(job.format)
-    df = reader.load(output_path) if job.format == "delta" else reader.load(uris)
+    reader = spark.read.format(output.format)
+    for key, value in output.options.items():
+        reader = reader.option(key, value)
+
+    df = reader.load(output_path) if output.format == "delta" else reader.load(uris)
     rows = df.groupBy(input_file_name().alias("_f")).count().collect()
     return {_key(row["_f"]): int(row["count"]) for row in rows}
 
@@ -414,7 +471,9 @@ def run(
     started = time.perf_counter()
     owns_session = spark is None
     params = {"run_date": run_date, **settings.values}
-    output_path = settings.resolve(job.output, **params)
+    # Every output path is resolved up front, so a bad template fails before
+    # any of them is written rather than leaving one format behind.
+    paths = [settings.resolve(output.path, **params) for output in job.outputs]
 
     log.info(
         "start %s env=%s run_date=%s dry_run=%s", job.name, settings.environment, run_date, dry_run
@@ -426,33 +485,41 @@ def run(
         metrics["input_rows"] = read_inputs(spark, job, settings, **params)
 
         result = spark.sql(settings.resolve(job.sql, **params))
+        # Cached because every extra output re-reads it; the SQL runs once no
+        # matter how many formats are written.
         result.cache()
         metrics["output_rows"] = result.count()
-        metrics["target"] = output_path
-        log.info("transform rows=%s -> %s", metrics["output_rows"], output_path)
+        metrics["targets"] = paths
+        log.info("transform rows=%s -> %d output(s)", metrics["output_rows"], len(paths))
 
         if dry_run:
-            log.info("dry run - nothing written")
+            for output, path in zip(job.outputs, paths):
+                log.info("would write %s as %s (mode=%s)", path, output.format, output.mode)
             result.explain(mode="formatted")
             return metrics
 
-        # Resolved before the write: an overwrite can delete the partitions the
-        # previous watermark would be read from.
         checkpoint_to = int(
             datetime.now(timezone.utc).strftime(settings.get("CHECKPOINT_FORMAT", "%Y%m%d%H%M%S"))
         )
-        checkpoint_from = (
-            previous_checkpoint(spark, job, output_path, settings) if job.manifest else None
-        )
+        manifests: list[str] = []
 
-        write(result, job, output_path)
-        log.info("wrote %s (%s, mode=%s)", output_path, job.format, job.mode)
-
-        if job.manifest:
-            metrics["manifests"] = write_manifests(
-                spark, result, job, output_path, checkpoint_from, checkpoint_to, settings, run_date
+        for output, path in zip(job.outputs, paths):
+            # Resolved before this output's write: an overwrite can delete the
+            # partitions its previous watermark would be read from.
+            checkpoint_from = (
+                previous_checkpoint(spark, output, path, settings) if output.manifest else None
             )
 
+            write(result, output, path)
+            log.info("wrote %s (%s, mode=%s)", path, output.format, output.mode)
+
+            if output.manifest:
+                manifests += write_manifests(
+                    spark, result, output, path, checkpoint_from, checkpoint_to, settings, run_date
+                )
+
+        if manifests:
+            metrics["manifests"] = manifests
         metrics["seconds"] = round(time.perf_counter() - started, 2)
         log.info("done %s in %ss", job.name, metrics["seconds"])
         return metrics

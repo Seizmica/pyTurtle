@@ -6,7 +6,7 @@
 Owner: data-eng@company.com
 """
 
-from util.runner import Job, main
+from util.runner import Job, Output, main
 
 # ${RUN_DATE-style tokens} are resolved from the .env file plus --run-date.
 SQL = """
@@ -39,12 +39,26 @@ CUSTOMER = Job(
             "options": {"mergeSchema": "true"},
         },
     },
-    output="${CURATED_ROOT}/customer/",
-    format="parquet",
-    mode="overwrite",
-    partition_by=["run_date"],
-    options={"compression": "snappy"},
-    manifest=True,
+    outputs=[
+        # Curated parquet for downstream jobs.
+        Output(
+            path="${CURATED_ROOT}/customer/",
+            format="parquet",
+            mode="overwrite",
+            partition_by=["run_date"],
+            options={"compression": "snappy"},
+            manifest=True,
+        ),
+        # A csv copy for the business hand-off, on its own path. The SQL runs
+        # once; the cached result is written twice.
+        Output(
+            path="${EXPORT_ROOT}/customer/",
+            format="csv",
+            mode="overwrite",
+            partition_by=["run_date"],
+            options={"header": "true", "compression": "gzip"},
+        ),
+    ],
 )
 
 

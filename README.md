@@ -38,7 +38,7 @@ Copy `jobs/customer.py`, change the SQL and the `Job(...)`. No other file
 changes.
 
 ```python
-from util.runner import Job, main
+from util.runner import Job, Output, main
 
 SQL = """
 SELECT product_id, SUM(qty) AS units, '${run_date}' AS run_date
@@ -51,9 +51,13 @@ SHIPMENTS = Job(
     name="shipments",
     sql=SQL,
     inputs={"shipments": "${RAW_ROOT}/shipments/"},
-    output="${CURATED_ROOT}/shipments/",
-    partition_by=["run_date"],
-    manifest=True,
+    outputs=[
+        Output(
+            path="${CURATED_ROOT}/shipments/",
+            partition_by=["run_date"],
+            manifest=True,
+        ),
+    ],
 )
 
 if __name__ == "__main__":
@@ -99,16 +103,58 @@ Partition pruning still works on table inputs: filters in the job's SQL push
 down through the temp view into the table scan, so a `WHERE` on a partition
 column does not read the whole table.
 
+### Outputs: parquet, csv, or both
+
+A job declares a list of `Output`s. Writing two formats is just two entries —
+each with its **own path**, options, and partitioning. The SQL runs once; the
+cached result is written to each destination in turn.
+
+```python
+outputs=[
+    Output(
+        path="${CURATED_ROOT}/customer/",
+        format="parquet",
+        partition_by=["run_date"],
+        options={"compression": "snappy"},
+        manifest=True,
+    ),
+    Output(
+        path="${EXPORT_ROOT}/customer/",
+        format="csv",
+        partition_by=["run_date"],
+        options={"header": "true", "compression": "gzip"},
+    ),
+]
+```
+
+Supported formats are `parquet`, `csv`, and `delta` — anything else fails
+validation. `delta` exists for incremental `mode="merge"` loads; `parquet` and
+`csv` are the plain formats.
+
+Outputs must have distinct paths, or the second would clobber the first.
+
+`options` are writer options and differ per format: `compression` for parquet,
+`header`/`sep`/`quote` for csv. **Set `header: "true"` explicitly** if you want
+one — Spark writes csv without a header by default.
+
 ### Job options
 
 | Field | Default | Notes |
 |-------|---------|-------|
 | `inputs` | required | `{view: path}`, `{view: {path, format, options}}`, or `{view: {table}}` |
-| `output` | required | Path template |
-| `format` | `parquet` | `parquet`, `delta`, `csv`, `json`, `orc` |
+| `outputs` | required | List of `Output` — at least one |
+| `input_format` | `parquet` | Default read format for file inputs that don't set one |
+
+### Output options
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `path` | required | Path template |
+| `format` | `parquet` | `parquet`, `csv`, or `delta` |
 | `mode` | `overwrite` | `append`, `overwrite`, or `merge` (Delta upsert) |
 | `partition_by` | `[]` | Hive-style partition columns |
 | `merge_keys` | `[]` | Required for `mode="merge"` |
+| `options` | `{}` | Writer options for that format |
 | `manifest` | `False` | Write `manifest.json` per partition |
 
 ## Environments
@@ -120,6 +166,7 @@ place.
 ```bash
 RAW_ROOT=s3a://raw-prod
 CURATED_ROOT=s3a://curated-prod
+EXPORT_ROOT=s3a://export-prod        # csv hand-off copies
 HIVE_DB=analytics_prod
 SPARK_MASTER=yarn
 SPARK_CONF.spark.sql.shuffle.partitions=200

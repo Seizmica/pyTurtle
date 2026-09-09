@@ -13,7 +13,7 @@ pyspark = pytest.importorskip("pyspark")
 from pyspark.sql import SparkSession
 
 from util.config import Settings
-from util.runner import Job, _key, run
+from util.runner import Job, Output, _key, run
 
 RUN_DATE = "2026-06-28"
 
@@ -57,9 +57,34 @@ def settings(tmp_path, spark):
         values={
             "RAW_ROOT": str(raw),
             "CURATED_ROOT": str(tmp_path / "curated"),
+            "EXPORT_ROOT": str(tmp_path / "export"),
             "APP_VERSION": "1.4.2",
             "CHECKPOINT_FORMAT": "%Y%m%d%H%M%S",
         },
+    )
+
+
+def _parquet_out(**overrides):
+    return Output(
+        **{
+            "path": "${CURATED_ROOT}/customer/",
+            "format": "parquet",
+            "partition_by": ["run_date"],
+            "manifest": True,
+            **overrides,
+        }
+    )
+
+
+def _csv_out(**overrides):
+    return Output(
+        **{
+            "path": "${EXPORT_ROOT}/customer/",
+            "format": "csv",
+            "partition_by": ["run_date"],
+            "options": {"header": "true"},
+            **overrides,
+        }
     )
 
 
@@ -76,9 +101,7 @@ def _job(**overrides):
             "customers": "${RAW_ROOT}/customers/",
             "orders": "${RAW_ROOT}/orders/",
         },
-        "output": "${CURATED_ROOT}/customer/",
-        "partition_by": ["run_date"],
-        "manifest": True,
+        "outputs": [_parquet_out()],
     }
     return Job(**{**base, **overrides})
 
@@ -100,7 +123,7 @@ def test_read_sql_write(settings, spark):
     assert metrics["output_rows"] == 2
     assert metrics["input_rows"] == {"customers": 2, "orders": 3}
 
-    written = spark.read.parquet(metrics["target"]).orderBy("customer_id").collect()
+    written = spark.read.parquet(metrics["targets"][0]).orderBy("customer_id").collect()
     assert [r["total_spend"] for r in written] == [15.0, 20.0]
 
 
@@ -121,14 +144,74 @@ def test_catalog_table_input_joined_to_file_input(settings, spark):
 
     assert metrics["input_rows"] == {"customers": 2, "orders": 3}
     assert metrics["output_rows"] == 2
-    written = spark.read.parquet(metrics["target"]).orderBy("customer_id").collect()
+    written = spark.read.parquet(metrics["targets"][0]).orderBy("customer_id").collect()
     assert [r["total_spend"] for r in written] == [15.0, 20.0]
 
 
 def test_dry_run_writes_nothing(settings, spark):
-    metrics = run(_job(), settings, RUN_DATE, dry_run=True, spark=spark)
+    metrics = run(
+        _job(outputs=[_parquet_out(), _csv_out()]), settings, RUN_DATE, dry_run=True, spark=spark
+    )
 
     assert metrics["output_rows"] == 2
+    assert not Path(settings.values["CURATED_ROOT"]).exists()
+    assert not Path(settings.values["EXPORT_ROOT"]).exists()
+
+
+# --- multiple output formats ---------------------------------------------
+
+
+def test_parquet_and_csv_written_from_one_run(settings, spark):
+    """Both formats land, on their own paths, from a single SQL execution."""
+    metrics = run(_job(outputs=[_parquet_out(), _csv_out()]), settings, RUN_DATE, spark=spark)
+
+    parquet_path, csv_path = metrics["targets"]
+    assert parquet_path != csv_path
+
+    from_parquet = spark.read.parquet(parquet_path).orderBy("customer_id").collect()
+    from_csv = spark.read.option("header", "true").csv(csv_path).orderBy("customer_id").collect()
+
+    assert [r["customer_id"] for r in from_parquet] == [1, 2]
+    assert [int(r["customer_id"]) for r in from_csv] == [1, 2]
+    assert [float(r["total_spend"]) for r in from_csv] == [15.0, 20.0]
+
+
+def test_csv_output_is_partitioned_like_parquet(settings, spark):
+    run(_job(outputs=[_parquet_out(), _csv_out()]), settings, RUN_DATE, spark=spark)
+
+    csv_partition = Path(settings.values["EXPORT_ROOT"]) / "customer" / f"run_date={RUN_DATE}"
+    assert csv_partition.is_dir()
+    assert any(p.suffix == ".csv" for p in csv_partition.iterdir())
+
+
+def test_csv_manifest_counts_exclude_the_header_row(settings, spark):
+    """Re-reading a header=true csv without the option would inflate every count."""
+    csv_with_manifest = _csv_out(
+        path="${EXPORT_ROOT}/customer_manifest/",
+        manifest=True,
+        options={"header": "true"},
+    )
+    run(_job(outputs=[csv_with_manifest]), settings, RUN_DATE, spark=spark)
+
+    path = (
+        Path(settings.values["EXPORT_ROOT"])
+        / "customer_manifest"
+        / f"run_date={RUN_DATE}"
+        / "manifest.json"
+    )
+    doc = json.loads(path.read_text(encoding="utf-8"))
+
+    # 2 data rows, not 2 + one header line per shard.
+    assert doc["row_count"] == 2
+
+
+def test_one_output_failing_does_not_silently_skip_the_other(settings, spark):
+    """A bad path template fails before anything is written, not midway."""
+    job = _job(outputs=[_parquet_out(), _csv_out(path="${NOT_DEFINED}/x/")])
+
+    with pytest.raises(Exception, match="NOT_DEFINED"):
+        run(job, settings, RUN_DATE, spark=spark)
+
     assert not Path(settings.values["CURATED_ROOT"]).exists()
 
 
