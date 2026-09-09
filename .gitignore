@@ -6,6 +6,9 @@ __pycache__/
 venv/
 spark-warehouse/
 output/
+# Local Derby metastore, created by a local Spark session with Hive support.
+metastore_db/
+derby.log
 
 # Local, uncommitted overrides. The committed .env.<environment> files hold
 # non-secret wiring only; real credentials come from the process environment.
