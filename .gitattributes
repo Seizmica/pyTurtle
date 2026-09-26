@@ -1,0 +1,3 @@
+# submit.sh is authored on Windows and run on a Linux gateway; CRLF would make
+# the shebang unusable ("bad interpreter: /usr/bin/env bash^M").
+*.sh text eol=lf

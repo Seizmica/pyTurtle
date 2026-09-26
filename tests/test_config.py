@@ -35,6 +35,24 @@ def test_unknown_environment_is_rejected(tmp_path):
         config.load("staging", root=tmp_path)
 
 
+def test_config_root_env_var_locates_the_file(tmp_path, monkeypatch):
+    """Under spark-submit the source ships in a zip and .env arrives via --files,
+    so the repo-relative lookup misses and ETL_CONFIG_ROOT takes over."""
+    _write_env(tmp_path, "prod", "RAW_ROOT=hdfs://nn/raw\n")
+    monkeypatch.setenv("ETL_CONFIG_ROOT", str(tmp_path))
+
+    settings = config.load("prod")
+
+    assert settings.require("RAW_ROOT") == "hdfs://nn/raw"
+
+
+def test_an_explicit_root_beats_the_config_root_env_var(tmp_path, monkeypatch):
+    _write_env(tmp_path, "uat", "RAW_ROOT=hdfs://nn/explicit\n")
+    monkeypatch.setenv("ETL_CONFIG_ROOT", str(tmp_path / "elsewhere"))
+
+    assert config.load("uat", root=tmp_path).require("RAW_ROOT") == "hdfs://nn/explicit"
+
+
 def test_missing_env_file_names_the_path(tmp_path):
     with pytest.raises(ConfigError, match="Environment file not found"):
         config.load("prod", root=tmp_path)

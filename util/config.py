@@ -124,7 +124,20 @@ class Settings:
 
 
 def env_file(environment: str, root: Path | None = None) -> Path:
-    return (root or REPO_ROOT) / f".env.{environment}"
+    """Locate ``.env.<environment>``.
+
+    An explicit ``root`` wins, then ``ETL_CONFIG_ROOT``, then the repo tree.
+
+    The env var exists for ``spark-submit``: in cluster mode the source tree is
+    shipped as a zip on ``sys.path``, so ``REPO_ROOT`` resolves to the archive
+    itself rather than a real directory, while ``--files .env.<env>`` delivers
+    the file to the container working directory. Setting
+    ``spark.yarn.appMasterEnv.ETL_CONFIG_ROOT=.`` points the lookup there.
+    """
+    if root is None:
+        override = os.environ.get("ETL_CONFIG_ROOT")
+        root = Path(override) if override else REPO_ROOT
+    return root / f".env.{environment}"
 
 
 def load(environment: str | None = None, root: Path | None = None) -> Settings:
