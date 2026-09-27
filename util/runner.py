@@ -17,12 +17,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
+import traceback
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 from util import config
 from util.config import ConfigError, Settings
@@ -455,6 +460,94 @@ def _key(uri: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# Failure reporting
+# --------------------------------------------------------------------------
+
+# Exit codes by stage. Under ``--deploy-mode cluster`` the traceback goes to a
+# container log that may be unreachable, while the exit code always comes back
+# to the submitter as "User application exited with N" — so the stage that
+# failed is encoded there. 10-16 are deliberately skipped: those are the YARN
+# ApplicationMaster's own codes, and reusing them would be ambiguous.
+EXIT_CONFIG = 2
+EXIT_SESSION = 20
+EXIT_READ = 21
+EXIT_TRANSFORM = 22
+EXIT_WRITE = 23
+EXIT_UNKNOWN = 30
+
+
+class StageFailure(RuntimeError):
+    """A failure tagged with the stage it happened in and that stage's code."""
+
+    def __init__(self, stage: str, code: int, cause: BaseException) -> None:
+        super().__init__(f"{stage} failed: {type(cause).__name__}: {cause}")
+        self.stage = stage
+        self.code = code
+        self.cause = cause
+
+
+@contextmanager
+def _stage(name: str, code: int) -> Iterator[None]:
+    """Tag whatever fails inside with the stage it failed in."""
+    try:
+        yield
+    except (ConfigError, StageFailure):
+        raise  # already carries its own message and exit code
+    except Exception as exc:
+        raise StageFailure(name, code, exc) from exc
+
+
+def write_failure_report(
+    settings: Settings,
+    job: Job,
+    exc: BaseException,
+    spark: SparkSession | None = None,
+) -> str | None:
+    """Put the traceback where it can be read without container logs.
+
+    Writes to ``FAILURE_REPORT_DIR`` when that key is set, and returns the path
+    written or ``None``. Best-effort throughout: a failed report must never
+    replace the failure it is reporting.
+
+    Two ways in, because the most interesting failures happen before there is a
+    session to write through: the JVM filesystem when one exists, otherwise the
+    ``hdfs`` client the container has on its PATH.
+    """
+    directory = settings.get("FAILURE_REPORT_DIR")
+    if not directory:
+        return None
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    target = f"{directory.rstrip('/')}/{job.name}-{stamp}.log"
+    body = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    header = (
+        f"job={job.name} environment={settings.environment} "
+        f"application={os.environ.get('SPARK_APPLICATION_ID', 'unknown')}\n\n"
+    )
+
+    try:
+        if spark is not None:
+            _write_text(spark, target, header + body)
+            return target
+
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".log", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(header + body)
+            local = handle.name
+        subprocess.run(
+            ["hdfs", "dfs", "-put", "-f", local, target],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        return target
+    except Exception as report_exc:  # noqa: BLE001 - reporting must not mask the failure
+        log.warning("could not write the failure report to %s: %s", target, report_exc)
+        return None
+
+
+# --------------------------------------------------------------------------
 # Run
 # --------------------------------------------------------------------------
 
@@ -481,14 +574,17 @@ def run(
     metrics: dict[str, Any] = {"job": job.name, "environment": settings.environment}
 
     try:
-        spark = spark or build_spark(job, settings)
-        metrics["input_rows"] = read_inputs(spark, job, settings, **params)
+        with _stage("session", EXIT_SESSION):
+            spark = spark or build_spark(job, settings)
+        with _stage("read inputs", EXIT_READ):
+            metrics["input_rows"] = read_inputs(spark, job, settings, **params)
 
-        result = spark.sql(settings.resolve(job.sql, **params))
-        # Cached because every extra output re-reads it; the SQL runs once no
-        # matter how many formats are written.
-        result.cache()
-        metrics["output_rows"] = result.count()
+        with _stage("transform", EXIT_TRANSFORM):
+            result = spark.sql(settings.resolve(job.sql, **params))
+            # Cached because every extra output re-reads it; the SQL runs once
+            # no matter how many formats are written.
+            result.cache()
+            metrics["output_rows"] = result.count()
         metrics["targets"] = paths
         log.info("transform rows=%s -> %d output(s)", metrics["output_rows"], len(paths))
 
@@ -504,25 +600,41 @@ def run(
         manifests: list[str] = []
 
         for output, path in zip(job.outputs, paths):
-            # Resolved before this output's write: an overwrite can delete the
-            # partitions its previous watermark would be read from.
-            checkpoint_from = (
-                previous_checkpoint(spark, output, path, settings) if output.manifest else None
-            )
-
-            write(result, output, path)
-            log.info("wrote %s (%s, mode=%s)", path, output.format, output.mode)
-
-            if output.manifest:
-                manifests += write_manifests(
-                    spark, result, output, path, checkpoint_from, checkpoint_to, settings, run_date
+            with _stage(f"write {path}", EXIT_WRITE):
+                # Resolved before this output's write: an overwrite can delete
+                # the partitions its previous watermark would be read from.
+                checkpoint_from = (
+                    previous_checkpoint(spark, output, path, settings) if output.manifest else None
                 )
+
+                write(result, output, path)
+                log.info("wrote %s (%s, mode=%s)", path, output.format, output.mode)
+
+                if output.manifest:
+                    manifests += write_manifests(
+                        spark,
+                        result,
+                        output,
+                        path,
+                        checkpoint_from,
+                        checkpoint_to,
+                        settings,
+                        run_date,
+                    )
 
         if manifests:
             metrics["manifests"] = manifests
         metrics["seconds"] = round(time.perf_counter() - started, 2)
         log.info("done %s in %ss", job.name, metrics["seconds"])
         return metrics
+    except Exception as exc:
+        # Written from here rather than from main() because this is where the
+        # session is in scope, and the session is the more reliable of the two
+        # ways the report can reach a readable path.
+        reported = write_failure_report(settings, job, exc, spark)
+        if reported:
+            log.error("failure report written to %s", reported)
+        raise
     finally:
         if spark is not None and owns_session:
             spark.stop()
@@ -548,7 +660,16 @@ def main(job: Job, argv: list[str] | None = None) -> int:
         run(job, settings, args.run_date, args.dry_run)
     except ConfigError as exc:
         log.error("%s", exc)
-        return 2
+        return EXIT_CONFIG
+    except StageFailure as exc:
+        # log.exception keeps the traceback in the container log for whoever can
+        # read it; the return code carries the stage to whoever cannot.
+        log.exception("%s", exc)
+        log.error("%s stage failed - exiting %d", exc.stage, exc.code)
+        return exc.code
+    except Exception:
+        log.exception("unhandled failure")
+        return EXIT_UNKNOWN
     return 0
 
 
