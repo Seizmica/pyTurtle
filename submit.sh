@@ -17,6 +17,9 @@
 #                        cluster mode, where Ivy resolution runs in the driver
 #                        container and stalls there if it cannot reach a mirror
 #   KEYTAB / PRINCIPAL   let the driver renew its own Kerberos tickets
+#   SPARK_FILES          extra files to ship, comma-separated (hive-site.xml,
+#                        log4j2.properties, ...); each lands in the container
+#                        working directory and is referred to by basename
 #   TRUSTSTORE           a cacerts file to ship and trust (see below)
 #   TRUSTSTORE_PASSWORD  only if it is not the JDK default
 set -euo pipefail
@@ -38,16 +41,33 @@ BUNDLE="$(mktemp -d)/etl.zip"
 zip -qr "$BUNDLE" util jobs -x '*__pycache__*' '*.pyc'
 
 # --files takes ONE comma-separated list; a second --files flag would replace
-# this one rather than add to it.
+# this one rather than add to it. Every entry is localized into the container
+# working directory, so anything referring to one uses its basename — never the
+# submitting machine's path, which does not exist on the cluster node.
 FILES=".env.${ENV}"
 EXTRA=()
 
-# Every --files entry is localized into the container working directory, so the
-# JVM and the config loader both refer to it by basename — never by the
-# submitting machine's path, which does not exist on the cluster node.
+_add_file() {
+  FILES="${FILES},$1"
+}
+
+# Config the cluster does not already provide: hive-site.xml when the metastore
+# is not on the AM classpath, a log4j2.properties, a krb5.conf.
+if [ -n "${SPARK_FILES:-}" ]; then
+  IFS=',' read -r -a FILE_ENTRIES <<< "$SPARK_FILES"
+  for FILE in "${FILE_ENTRIES[@]}"; do
+    [ -n "$FILE" ] || continue
+    case "$FILE" in
+      *://*) ;;  # hdfs://, s3a://, ... — resolved by the cluster, not here
+      *) [ -f "$FILE" ] || { echo "file not found: $FILE" >&2; exit 2; } ;;
+    esac
+    _add_file "$FILE"
+  done
+fi
+
 if [ -n "${TRUSTSTORE:-}" ]; then
   [ -f "$TRUSTSTORE" ] || { echo "TRUSTSTORE not found: $TRUSTSTORE" >&2; exit 2; }
-  FILES="${FILES},${TRUSTSTORE}"
+  _add_file "$TRUSTSTORE"
   TLS_OPTS="-Djavax.net.ssl.trustStore=$(basename "$TRUSTSTORE")"
   if [ -n "${TRUSTSTORE_PASSWORD:-}" ]; then
     TLS_OPTS="${TLS_OPTS} -Djavax.net.ssl.trustStorePassword=${TRUSTSTORE_PASSWORD}"
