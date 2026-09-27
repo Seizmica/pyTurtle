@@ -10,7 +10,12 @@
 #
 # Optional environment:
 #   YARN_QUEUE  DRIVER_MEMORY  EXECUTOR_MEMORY  EXECUTOR_CORES  NUM_EXECUTORS
-#   SPARK_PACKAGES       extra jars, e.g. io.delta:delta-spark_2.12:3.2.0
+#   SPARK_JARS           jar paths to ship, comma-separated (local or hdfs://)
+#   JARS_DIR             a directory whose *.jar files are all shipped
+#   SPARK_PACKAGES       resolve jars from Maven instead, e.g.
+#                        io.delta:delta-spark_2.12:3.2.0 -- prefer SPARK_JARS in
+#                        cluster mode, where Ivy resolution runs in the driver
+#                        container and stalls there if it cannot reach a mirror
 #   KEYTAB / PRINCIPAL   let the driver renew its own Kerberos tickets
 #   TRUSTSTORE           a cacerts file to ship and trust (see below)
 #   TRUSTSTORE_PASSWORD  only if it is not the JDK default
@@ -53,6 +58,44 @@ if [ -n "${TRUSTSTORE:-}" ]; then
   EXTRA+=(--conf "spark.executor.extraJavaOptions=${TLS_OPTS}")
 fi
 
+# --jars, like --files, takes ONE comma-separated list. Local paths are uploaded
+# on every submission; an hdfs:// path is localized by YARN without that
+# re-upload, which is worth doing for jars that do not change between runs.
+JARS=""
+_add_jar() {
+  if [ -z "$JARS" ]; then JARS="$1"; else JARS="${JARS},$1"; fi
+}
+
+if [ -n "${JARS_DIR:-}" ]; then
+  [ -d "$JARS_DIR" ] || { echo "JARS_DIR is not a directory: $JARS_DIR" >&2; exit 2; }
+  FOUND=0
+  for JAR in "$JARS_DIR"/*.jar; do
+    [ -f "$JAR" ] || continue
+    _add_jar "$JAR"
+    FOUND=1
+  done
+  [ "$FOUND" = 1 ] || { echo "no .jar files under $JARS_DIR" >&2; exit 2; }
+fi
+
+if [ -n "${SPARK_JARS:-}" ]; then
+  # Split the caller's list so a typo fails here rather than as a
+  # ClassNotFoundException once the driver is already running on the cluster.
+  IFS=',' read -r -a JAR_ENTRIES <<< "$SPARK_JARS"
+  for JAR in "${JAR_ENTRIES[@]}"; do
+    [ -n "$JAR" ] || continue
+    case "$JAR" in
+      *://*) ;;  # hdfs://, s3a://, ... — resolved by the cluster, not here
+      *) [ -f "$JAR" ] || { echo "jar not found: $JAR" >&2; exit 2; } ;;
+    esac
+    _add_jar "$JAR"
+  done
+fi
+
+# In cluster mode --jars reaches the driver and the executors both, which is
+# what Delta needs: build_spark sets spark.sql.extensions and the catalog, but
+# the classes behind them have to be on the classpath.
+[ -n "$JARS" ] && EXTRA+=(--jars "$JARS")
+
 [ -n "${SPARK_PACKAGES:-}" ] && EXTRA+=(--packages "$SPARK_PACKAGES")
 
 if [ -n "${KEYTAB:-}" ]; then
@@ -62,6 +105,13 @@ fi
 # ETL_CONFIG_ROOT points the config loader at the working directory where
 # --files delivers .env.<env>: inside the zip the source tree is not a real
 # directory, so the default repo-relative lookup misses.
+#
+# SPARK_MASTER is overridden for the same reason .env.dev can keep local[*] for
+# local runs: build_spark calls builder.master() unconditionally, which would
+# replace the master spark-submit set. A local master in the AM container
+# builds a SparkContext that never registers with the ApplicationMaster, and
+# YARN fails the app with exit code 13. The process environment beats a
+# declared .env key, so passing it here is enough.
 exec "${SPARK_HOME:?set SPARK_HOME to the Spark client matching the cluster}/bin/spark-submit" \
   --master "${SPARK_MASTER_URL:-yarn}" \
   --deploy-mode cluster \
@@ -70,6 +120,7 @@ exec "${SPARK_HOME:?set SPARK_HOME to the Spark client matching the cluster}/bin
   --py-files "$BUNDLE" \
   --files "$FILES" \
   --conf spark.yarn.appMasterEnv.ETL_CONFIG_ROOT=. \
+  --conf "spark.yarn.appMasterEnv.SPARK_MASTER=${SPARK_MASTER_URL:-yarn}" \
   --conf spark.yarn.submit.waitAppCompletion=true \
   --driver-memory "${DRIVER_MEMORY:-2g}" \
   --executor-memory "${EXECUTOR_MEMORY:-4g}" \
