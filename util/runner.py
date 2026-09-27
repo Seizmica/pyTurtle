@@ -147,12 +147,27 @@ class Job:
 
 def build_spark(job: Job, settings: Settings) -> SparkSession:
     """Build a session from ``.env``: SPARK_MASTER and any SPARK_CONF.* keys."""
+    import pyspark
     from pyspark.sql import SparkSession
 
     app_name = f"{job.name}-{settings.environment}"
-    builder = SparkSession.builder.appName(app_name)
-
     master = settings.get("SPARK_MASTER")
+
+    # Logged before the attempt, because a session that fails to build takes its
+    # versions down with it — and a client that does not match the cluster is
+    # exactly the kind of failure that surfaces here. The client version is the
+    # library's own; spark.version below is what the cluster actually runs.
+    log.info(
+        "building session app=%s pyspark=%s python=%s master=%s hive=%s delta=%s",
+        app_name,
+        pyspark.__version__,
+        sys.version.split()[0],
+        master or "from spark-submit",
+        job.reads_hive(),
+        job.uses_delta(),
+    )
+
+    builder = SparkSession.builder.appName(app_name)
     if master:
         builder = builder.master(master)
 
@@ -171,7 +186,16 @@ def build_spark(job: Job, settings: Settings) -> SparkSession:
         # by SPARK_CONF.hive.metastore.uris in the .env file.
         builder = builder.enableHiveSupport()
 
-    return builder.getOrCreate()
+    spark = builder.getOrCreate()
+    context = spark.sparkContext
+    log.info(
+        "session ready spark=%s master=%s user=%s app=%s",
+        spark.version,
+        context.master,
+        context.sparkUser(),
+        context.applicationId,
+    )
+    return spark
 
 
 def _spec(source: Any) -> dict[str, Any]:

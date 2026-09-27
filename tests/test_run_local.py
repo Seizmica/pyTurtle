@@ -13,7 +13,7 @@ pyspark = pytest.importorskip("pyspark")
 from pyspark.sql import SparkSession
 
 from util.config import Settings
-from util.runner import Job, Output, _key, run
+from util.runner import Job, Output, _key, build_spark, run
 
 RUN_DATE = "2026-06-28"
 
@@ -62,6 +62,36 @@ def settings(tmp_path, spark):
             "CHECKPOINT_FORMAT": "%Y%m%d%H%M%S",
         },
     )
+
+
+def test_build_spark_logs_both_versions(spark, settings, caplog):
+    """The client version before the attempt, the cluster's after it.
+
+    A client that does not match the cluster fails inside getOrCreate, so the
+    first line has to be emitted before it, where it survives the failure.
+    """
+    job = Job(
+        name="probe",
+        sql="SELECT 1",
+        inputs={"orders": "${RAW_ROOT}/orders/"},
+        outputs=[Output(path="${CURATED_ROOT}/probe/")],
+    )
+
+    with caplog.at_level("INFO", logger="etl"):
+        # getOrCreate returns the module-scoped session, so this asserts on the
+        # logging rather than on a second JVM.
+        built = build_spark(job, settings)
+
+    assert built is not None
+    messages = [record.getMessage() for record in caplog.records]
+    building = [m for m in messages if m.startswith("building session")]
+    ready = [m for m in messages if m.startswith("session ready")]
+
+    assert building, messages
+    assert f"pyspark={pyspark.__version__}" in building[0]
+    assert "hive=False delta=False" in building[0]
+    assert ready, messages
+    assert f"spark={spark.version}" in ready[0]
 
 
 def _parquet_out(**overrides):
