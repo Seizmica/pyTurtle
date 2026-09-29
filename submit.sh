@@ -20,6 +20,10 @@
 #   SPARK_FILES          extra files to ship, comma-separated (hive-site.xml,
 #                        log4j2.properties, ...); each lands in the container
 #                        working directory and is referred to by basename
+#   DRIVER_JAVA_OPTIONS    -D flags for the driver JVM (do not pass
+#                          --driver-java-options yourself; it is the same
+#                          setting and would replace, not extend, this)
+#   EXECUTOR_JAVA_OPTIONS  -D flags for the executor JVMs
 #   TRUSTSTORE           a cacerts file to ship and trust (see below)
 #   TRUSTSTORE_PASSWORD  only if it is not the JDK default
 set -euo pipefail
@@ -65,6 +69,24 @@ if [ -n "${SPARK_FILES:-}" ]; then
   done
 fi
 
+# JVM options, merged rather than layered. spark.driver.extraJavaOptions is a
+# single string: --driver-java-options, a --conf for the same key, and this
+# script's own truststore flag all write to it, and the last writer wins
+# outright -- so combining them here is the only way none is silently dropped.
+# Use DRIVER_JAVA_OPTIONS rather than passing --driver-java-options yourself.
+DRIVER_OPTS="${DRIVER_JAVA_OPTIONS:-}"
+EXECUTOR_OPTS="${EXECUTOR_JAVA_OPTIONS:-}"
+
+_append_opt() {
+  # $1 is the name of the variable to append to, $2 the flag.
+  local current="${!1}"
+  if [ -z "$current" ]; then
+    printf -v "$1" '%s' "$2"
+  else
+    printf -v "$1" '%s %s' "$current" "$2"
+  fi
+}
+
 if [ -n "${TRUSTSTORE:-}" ]; then
   [ -f "$TRUSTSTORE" ] || { echo "TRUSTSTORE not found: $TRUSTSTORE" >&2; exit 2; }
   _add_file "$TRUSTSTORE"
@@ -74,9 +96,15 @@ if [ -n "${TRUSTSTORE:-}" ]; then
   fi
   # Both sides need it: the driver for metastore and object-store calls, the
   # executors for the reads and writes they do themselves.
-  EXTRA+=(--conf "spark.driver.extraJavaOptions=${TLS_OPTS}")
-  EXTRA+=(--conf "spark.executor.extraJavaOptions=${TLS_OPTS}")
+  _append_opt DRIVER_OPTS "$TLS_OPTS"
+  _append_opt EXECUTOR_OPTS "$TLS_OPTS"
 fi
+
+# A SPARK_CONF.spark.*.extraJavaOptions key in the .env file is applied by
+# build_spark through builder.config(), which beats anything passed here -- so
+# set these in one place, not both.
+[ -n "$DRIVER_OPTS" ] && EXTRA+=(--conf "spark.driver.extraJavaOptions=${DRIVER_OPTS}")
+[ -n "$EXECUTOR_OPTS" ] && EXTRA+=(--conf "spark.executor.extraJavaOptions=${EXECUTOR_OPTS}")
 
 # --jars, like --files, takes ONE comma-separated list. Local paths are uploaded
 # on every submission; an hdfs:// path is localized by YARN without that
