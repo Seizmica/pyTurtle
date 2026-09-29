@@ -10,11 +10,8 @@ which is how CI and a secret manager inject credentials without editing (or
 committing) them.
 """
 
-from __future__ import annotations
-
 import os
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
 ENVIRONMENTS = ("dev", "uat", "preprod", "prod")
@@ -29,7 +26,7 @@ class ConfigError(RuntimeError):
     """Unknown environment, missing ``.env`` file, or an unset required key."""
 
 
-def parse_env_file(path: Path) -> dict[str, str]:
+def parse_env_file(path: "Path") -> "dict[str, str]":
     """Parse ``KEY=value`` lines. Supports ``#`` comments, quotes, ``export``."""
     if not path.is_file():
         raise ConfigError(f"Environment file not found: {path}")
@@ -53,17 +50,27 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-@dataclass(frozen=True)
 class Settings:
-    """Resolved configuration for one environment."""
+    """Resolved configuration for one environment.
 
-    environment: str
-    values: dict[str, str]
+    Written out rather than declared with ``@dataclass``: this branch targets
+    Python 3.6, where ``dataclasses`` is not in the standard library and the
+    backport would be one more thing to install on a restricted machine.
+    """
 
-    def get(self, key: str, default: str | None = None) -> str | None:
+    __slots__ = ("environment", "values")
+
+    def __init__(self, environment: "str", values: "dict") -> "None":
+        self.environment = environment
+        self.values = values
+
+    def __repr__(self) -> "str":
+        return "Settings(environment={!r}, keys={})".format(self.environment, sorted(self.values))
+
+    def get(self, key: "str", default: "str | None" = None) -> "str | None":
         return self.values.get(key, default)
 
-    def require(self, key: str) -> str:
+    def require(self, key: "str") -> "str":
         """Fetch ``key`` or fail loudly — before any Spark work starts."""
         value = self.values.get(key)
         if value is None or value == "":
@@ -73,7 +80,7 @@ class Settings:
             )
         return value
 
-    def int(self, key: str, default: int) -> int:
+    def int(self, key: "str", default: "int") -> "int":
         raw = self.values.get(key)
         if raw is None or raw == "":
             return default
@@ -82,13 +89,13 @@ class Settings:
         except ValueError as exc:
             raise ConfigError(f"{key} must be an integer, got {raw!r}") from exc
 
-    def bool(self, key: str, default: bool = False) -> bool:
+    def bool(self, key: "str", default: "bool" = False) -> "bool":
         raw = self.values.get(key)
         if raw is None or raw == "":
             return default
         return raw.strip().lower() in ("1", "true", "yes", "on")
 
-    def prefixed(self, prefix: str) -> dict[str, str]:
+    def prefixed(self, prefix: "str") -> "dict[str, str]":
         """Keys under ``prefix``, with the prefix stripped.
 
         Used for ``SPARK_CONF.spark.sql.shuffle.partitions=200`` style entries,
@@ -100,7 +107,7 @@ class Settings:
             if key.startswith(prefix) and len(key) > len(prefix)
         }
 
-    def resolve(self, text: str, **extra: object) -> str:
+    def resolve(self, text: "str", **extra: "object") -> "str":
         """Expand ``${VAR}`` / ``${VAR:-default}`` in ``text``.
 
         Lookup order: ``extra`` (per-run values such as ``run_date``), then the
@@ -108,7 +115,7 @@ class Settings:
         """
         overrides = {k: str(v) for k, v in extra.items()}
 
-        def replace(match: re.Match[str]) -> str:
+        def replace(match: "re.Match[str]") -> "str":
             name, default = match.group(1), match.group(2)
             for source in (overrides, self.values, os.environ):
                 if name in source:
@@ -123,7 +130,7 @@ class Settings:
         return _TOKEN.sub(replace, text)
 
 
-def env_file(environment: str, root: Path | None = None) -> Path:
+def env_file(environment: "str", root: "Path | None" = None) -> "Path":
     """Locate ``.env.<environment>``.
 
     An explicit ``root`` wins, then ``ETL_CONFIG_ROOT``, then the repo tree.
@@ -140,7 +147,7 @@ def env_file(environment: str, root: Path | None = None) -> Path:
     return root / f".env.{environment}"
 
 
-def load(environment: str | None = None, root: Path | None = None) -> Settings:
+def load(environment: "str | None" = None, root: "Path | None" = None) -> "Settings":
     """Load settings for ``environment``, defaulting to ``$APP_ENV``."""
     environment = environment or os.environ.get("APP_ENV") or ""
     if environment not in ENVIRONMENTS:

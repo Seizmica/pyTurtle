@@ -1,11 +1,16 @@
 # Not a distributable package — this repo is a set of job scripts you clone and
 # run. Only dependencies and tooling config live here.
+#
+# This branch targets Python 3.6, which the submitting gateway is pinned to.
+# util/ and jobs/ parse and import there, so config loading and job validation
+# work; the Spark job itself does not, because PySpark 3.5 requires 3.8+ and
+# will not install on 3.6 at all. See tests/test_py36_compat.py.
 
 [project]
 name = "etl-lite"
 version = "0.1.0"
 description = "Project-specific PySpark job scripts: one script per data feed"
-requires-python = ">=3.10"
+requires-python = ">=3.6"
 dependencies = [
     "pyspark>=3.4",
 ]
@@ -22,11 +27,13 @@ delta = [
 
 [tool.black]
 line-length = 100
-target-version = ["py310"]
+target-version = ["py36"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+# ruff cannot target 3.6; py37 is its floor. tests/test_py36_compat.py
+# covers the gap between the two.
+target-version = "py37"
 
 [tool.ruff.lint.per-file-ignores]
 # pytest.importorskip("pyspark") must run before the pyspark import, so

@@ -49,10 +49,11 @@ def test_every_job_imports_from_inside_a_zip(tmp_path):
 
     result = subprocess.run(
         [sys.executable, "-c", program],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(archive)},
-        capture_output=True,
-        text=True,
+        cwd=str(tmp_path),
+        env=dict(os.environ, PYTHONPATH=str(archive)),
+        # capture_output= and text= are 3.7+; these are the 3.6 spellings.
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")

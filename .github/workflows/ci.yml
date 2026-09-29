@@ -11,6 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 3.6 itself is long EOL and unavailable on this runner; the source is
+        # held to it by tests/test_py36_compat.py, which inspects rather than
+        # executes and so reports the same result on any interpreter.
         python-version: ["3.10", "3.11"]
 
     steps:

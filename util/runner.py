@@ -12,8 +12,6 @@ All filesystem access goes through the JVM Hadoop API, which handles ``s3a://``
 and plain local paths alike — so there is one code path, not two.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -25,7 +23,6 @@ import tempfile
 import time
 import traceback
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterator
 
@@ -48,27 +45,43 @@ _SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/+")
 OUTPUT_FORMATS = ("parquet", "csv", "delta")
 
 
-@dataclass
 class Output:
     """One destination for the result.
 
     A job may declare several. The common case is a parquet copy for
     downstream jobs plus a csv copy for a hand-off, each with its own path,
     options, and partitioning.
+
+    Written out rather than declared with ``@dataclass``: this branch targets
+    Python 3.6, where ``dataclasses`` is not in the standard library. The
+    mutable defaults are built per instance, which is what default_factory did.
     """
 
-    path: str
-    format: str = "parquet"
-    # append | overwrite | merge  (merge is delta-only, upsert on merge_keys)
-    mode: str = "overwrite"
-    partition_by: list[str] = field(default_factory=list)
-    merge_keys: list[str] = field(default_factory=list)
-    # Writer options: `compression` for parquet, `header`/`sep` for csv.
-    options: dict[str, str] = field(default_factory=dict)
-    # Write a manifest.json into each partition directory this run produced.
-    manifest: bool = False
+    def __init__(
+        self,
+        path: "str",
+        format: "str" = "parquet",
+        # append | overwrite | merge (merge is delta-only, upsert on merge_keys)
+        mode: "str" = "overwrite",
+        partition_by: "list" = None,
+        merge_keys: "list" = None,
+        # Writer options: `compression` for parquet, `header`/`sep` for csv.
+        options: "dict" = None,
+        # Write a manifest.json into each partition directory this run produced.
+        manifest: "bool" = False,
+    ) -> "None":
+        self.path = path
+        self.format = format
+        self.mode = mode
+        self.partition_by = list(partition_by) if partition_by else []
+        self.merge_keys = list(merge_keys) if merge_keys else []
+        self.options = dict(options) if options else {}
+        self.manifest = manifest
 
-    def validate(self, job_name: str) -> None:
+    def __repr__(self) -> "str":
+        return "Output(path={!r}, format={!r}, mode={!r})".format(self.path, self.format, self.mode)
+
+    def validate(self, job_name: "str") -> "None":
         if self.format not in OUTPUT_FORMATS:
             raise ConfigError(
                 f"{job_name}: output format must be one of {', '.join(OUTPUT_FORMATS)}, "
@@ -85,21 +98,33 @@ class Output:
             raise ConfigError(f"{job_name}: every output needs a path")
 
 
-@dataclass
 class Job:
     """One data feed. Declared at the top of its own script."""
 
-    name: str
-    sql: str
-    # View name -> source. A bare string is a path. A dict is either a file
-    # source ({"path", "format", "options"}) or a Hive table ({"table"}).
-    inputs: dict[str, Any]
-    # One or more destinations. Several formats of the same result are written
-    # from one cached DataFrame, so the SQL runs once.
-    outputs: list[Output] = field(default_factory=list)
-    input_format: str = "parquet"
+    def __init__(
+        self,
+        name: "str",
+        sql: "str",
+        # View name -> source. A bare string is a path. A dict is either a file
+        # source ({"path", "format", "options"}) or a Hive table ({"table"}).
+        inputs: "dict" = None,
+        # One or more destinations. Several formats of the same result are
+        # written from one cached DataFrame, so the SQL runs once.
+        outputs: "list" = None,
+        input_format: "str" = "parquet",
+    ) -> "None":
+        self.name = name
+        self.sql = sql
+        self.inputs = dict(inputs) if inputs else {}
+        self.outputs = list(outputs) if outputs else []
+        self.input_format = input_format
 
-    def validate(self) -> None:
+    def __repr__(self) -> "str":
+        return "Job(name={!r}, inputs={}, outputs={})".format(
+            self.name, sorted(self.inputs), len(self.outputs)
+        )
+
+    def validate(self) -> "None":
         """Fail before Spark starts, not halfway through a write."""
         if not self.inputs:
             raise ConfigError(f"{self.name}: at least one input is required")
@@ -130,11 +155,11 @@ class Job:
                     "do not apply - the metastore describes it"
                 )
 
-    def reads_hive(self) -> bool:
+    def reads_hive(self) -> "bool":
         """Whether any input is a metastore table, so the session needs Hive."""
         return any("table" in _spec(source) for source in self.inputs.values())
 
-    def uses_delta(self) -> bool:
+    def uses_delta(self) -> "bool":
         return any(o.format == "delta" for o in self.outputs) or any(
             _spec(s).get("format") == "delta" for s in self.inputs.values()
         )
@@ -145,7 +170,7 @@ class Job:
 # --------------------------------------------------------------------------
 
 
-def build_spark(job: Job, settings: Settings) -> SparkSession:
+def build_spark(job: "Job", settings: "Settings") -> "SparkSession":
     """Build a session from ``.env``: SPARK_MASTER and any SPARK_CONF.* keys."""
     import pyspark
     from pyspark.sql import SparkSession
@@ -210,12 +235,12 @@ def build_spark(job: Job, settings: Settings) -> SparkSession:
     return spark
 
 
-def _spec(source: Any) -> dict[str, Any]:
+def _spec(source: "Any") -> "dict[str, Any]":
     """Normalize an input entry: a bare string is a path."""
     return source if isinstance(source, dict) else {"path": source}
 
 
-def _fmt(source: Any, job: Job) -> str:
+def _fmt(source: "Any", job: "Job") -> "str":
     """Read format for a *file* source. Meaningless for a table."""
     spec = _spec(source)
     if "table" in spec:
@@ -224,8 +249,8 @@ def _fmt(source: Any, job: Job) -> str:
 
 
 def load_source(
-    spark: SparkSession, job: Job, settings: Settings, source: Any, **params: object
-) -> tuple[DataFrame, str]:
+    spark: "SparkSession", job: "Job", settings: "Settings", source: "Any", **params: "object"
+) -> "tuple[DataFrame, str]":
     """Load one input. Returns the DataFrame and a loggable description.
 
     Two kinds of source:
@@ -250,8 +275,8 @@ def load_source(
 
 
 def read_inputs(
-    spark: SparkSession, job: Job, settings: Settings, **params: object
-) -> dict[str, int]:
+    spark: "SparkSession", job: "Job", settings: "Settings", **params: "object"
+) -> "dict[str, int]":
     """Register every input as a temp view named by its key. Returns row counts."""
     counts: dict[str, int] = {}
     for view, source in job.inputs.items():
@@ -267,7 +292,7 @@ def read_inputs(
 # --------------------------------------------------------------------------
 
 
-def write(df: DataFrame, output: Output, output_path: str) -> None:
+def write(df: "DataFrame", output: "Output", output_path: "str") -> "None":
     """Write one output per its format and mode. ``merge`` upserts into Delta."""
     if output.mode == "merge":
         _merge(df, output, output_path)
@@ -281,7 +306,7 @@ def write(df: DataFrame, output: Output, output_path: str) -> None:
     writer.save(output_path)
 
 
-def _merge(df: DataFrame, output: Output, output_path: str) -> None:
+def _merge(df: "DataFrame", output: "Output", output_path: "str") -> "None":
     """Upsert on ``merge_keys``; create the table on first run."""
     from delta.tables import DeltaTable
 
@@ -309,18 +334,18 @@ def _merge(df: DataFrame, output: Output, output_path: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def _fs(spark: SparkSession, path: str):  # noqa: ANN202 - JVM handles
+def _fs(spark: "SparkSession", path: "str"):  # noqa: ANN202 - JVM handles
     jvm = spark._jvm
     jpath = jvm.org.apache.hadoop.fs.Path(path)
     return jvm, jpath.getFileSystem(spark._jsc.hadoopConfiguration()), jpath
 
 
-def _is_hidden(name: str) -> bool:
+def _is_hidden(name: "str") -> "bool":
     """Spark side-cars: ``_SUCCESS``, ``_delta_log/``, ``.crc``."""
     return any(part.startswith((".", "_")) for part in name.split("/") if part)
 
 
-def _list_files(spark: SparkSession, directory: str) -> list[tuple[str, str, int]]:
+def _list_files(spark: "SparkSession", directory: "str") -> "list[tuple[str, str, int]]":
     """``(relative, uri, size_bytes)`` for each data file, sorted."""
     _, fs, jpath = _fs(spark, directory)
     if not fs.exists(jpath):
@@ -338,7 +363,7 @@ def _list_files(spark: SparkSession, directory: str) -> list[tuple[str, str, int
     return sorted(out)
 
 
-def _read_text(spark: SparkSession, path: str) -> str | None:
+def _read_text(spark: "SparkSession", path: "str") -> "str | None":
     jvm, fs, jpath = _fs(spark, path)
     if not fs.exists(jpath):
         return None
@@ -349,7 +374,7 @@ def _read_text(spark: SparkSession, path: str) -> str | None:
         stream.close()
 
 
-def _write_text(spark: SparkSession, path: str, text: str) -> None:
+def _write_text(spark: "SparkSession", path: "str", text: "str") -> "None":
     _, fs, jpath = _fs(spark, path)
     stream = fs.create(jpath, True)  # overwrite
     try:
@@ -358,7 +383,7 @@ def _write_text(spark: SparkSession, path: str, text: str) -> None:
         stream.close()
 
 
-def _subdirs(spark: SparkSession, directory: str) -> list[str]:
+def _subdirs(spark: "SparkSession", directory: "str") -> "list[str]":
     _, fs, jpath = _fs(spark, directory)
     if not fs.exists(jpath):
         return []
@@ -375,8 +400,8 @@ def _subdirs(spark: SparkSession, directory: str) -> list[str]:
 
 
 def previous_checkpoint(
-    spark: SparkSession, output: Output, output_path: str, settings: Settings
-) -> int | None:
+    spark: "SparkSession", output: "Output", output_path: "str", settings: "Settings"
+) -> "int | None":
     """Highest ``checkpoint_to`` in an existing partition's manifest.
 
     Call this BEFORE the write: an overwrite replaces the very partitions the
@@ -403,15 +428,15 @@ def previous_checkpoint(
 
 
 def write_manifests(
-    spark: SparkSession,
-    df: DataFrame,
-    output: Output,
-    output_path: str,
-    checkpoint_from: int | None,
-    checkpoint_to: int,
-    settings: Settings,
-    run_date: str | None,
-) -> list[str]:
+    spark: "SparkSession",
+    df: "DataFrame",
+    output: "Output",
+    output_path: "str",
+    checkpoint_from: "int | None",
+    checkpoint_to: "int",
+    settings: "Settings",
+    run_date: "str | None",
+) -> "list[str]":
     """Write ``manifest.json`` into each partition directory this run produced."""
     app_version = settings.get("APP_VERSION", "0.0.0")
 
@@ -461,8 +486,8 @@ def write_manifests(
 
 
 def _row_counts(
-    spark: SparkSession, output: Output, output_path: str, uris: list[str]
-) -> dict[str, int]:
+    spark: "SparkSession", output: "Output", output_path: "str", uris: "list[str]"
+) -> "dict[str, int]":
     """Exact rows per file, from one re-read of what was just written.
 
     Non-Delta formats are read as an explicit file list rather than as a
@@ -485,7 +510,7 @@ def _row_counts(
     return {_key(row["_f"]): int(row["count"]) for row in rows}
 
 
-def _key(uri: str) -> str:
+def _key(uri: "str") -> "str":
     """Scheme-insensitive key so a listing URI matches ``input_file_name()``.
 
     Hadoop's ``makeQualified`` reports ``file:/tmp/part-0.parquet`` where
@@ -515,7 +540,7 @@ EXIT_UNKNOWN = 30
 class StageFailure(RuntimeError):
     """A failure tagged with the stage it happened in and that stage's code."""
 
-    def __init__(self, stage: str, code: int, cause: BaseException) -> None:
+    def __init__(self, stage: "str", code: "int", cause: "BaseException") -> "None":
         super().__init__(f"{stage} failed: {type(cause).__name__}: {cause}")
         self.stage = stage
         self.code = code
@@ -523,7 +548,7 @@ class StageFailure(RuntimeError):
 
 
 @contextmanager
-def _stage(name: str, code: int) -> Iterator[None]:
+def _stage(name: "str", code: "int") -> "Iterator[None]":
     """Tag whatever fails inside with the stage it failed in."""
     try:
         yield
@@ -534,11 +559,11 @@ def _stage(name: str, code: int) -> Iterator[None]:
 
 
 def write_failure_report(
-    settings: Settings,
-    job: Job,
-    exc: BaseException,
-    spark: SparkSession | None = None,
-) -> str | None:
+    settings: "Settings",
+    job: "Job",
+    exc: "BaseException",
+    spark: "SparkSession | None" = None,
+) -> "str | None":
     """Put the traceback where it can be read without container logs.
 
     Writes to ``FAILURE_REPORT_DIR`` when that key is set, and returns the path
@@ -574,7 +599,9 @@ def write_failure_report(
         subprocess.run(
             ["hdfs", "dfs", "-put", "-f", local, target],
             check=True,
-            capture_output=True,
+            # capture_output= is 3.7+; these two are what it sets.
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             timeout=120,
         )
         return target
@@ -589,12 +616,12 @@ def write_failure_report(
 
 
 def run(
-    job: Job,
-    settings: Settings,
-    run_date: str,
-    dry_run: bool = False,
-    spark: SparkSession | None = None,
-) -> dict[str, Any]:
+    job: "Job",
+    settings: "Settings",
+    run_date: "str",
+    dry_run: "bool" = False,
+    spark: "SparkSession | None" = None,
+) -> "dict[str, Any]":
     """Execute one job end to end. Returns a small metrics dict."""
     job.validate()
     started = time.perf_counter()
@@ -676,7 +703,7 @@ def run(
             spark.stop()
 
 
-def main(job: Job, argv: list[str] | None = None) -> int:
+def main(job: "Job", argv: "list[str] | None" = None) -> "int":
     """CLI entry point for a job script."""
     parser = argparse.ArgumentParser(prog=job.name, description=f"Run the {job.name} feed.")
     parser.add_argument("--env", choices=config.ENVIRONMENTS, help="Defaults to $APP_ENV")
