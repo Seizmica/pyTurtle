@@ -24,6 +24,7 @@
 #                          --driver-java-options yourself; it is the same
 #                          setting and would replace, not extend, this)
 #   EXECUTOR_JAVA_OPTIONS  -D flags for the executor JVMs
+#   VERBOSE              print the resolved spark-submit configuration
 #   TRUSTSTORE           a cacerts file to ship and trust (see below)
 #   TRUSTSTORE_PASSWORD  only if it is not the JDK default
 set -euo pipefail
@@ -145,6 +146,10 @@ fi
 [ -n "$JARS" ] && EXTRA+=(--jars "$JARS")
 
 [ -n "${SPARK_PACKAGES:-}" ] && EXTRA+=(--packages "$SPARK_PACKAGES")
+
+# Prints the fully resolved configuration to this terminal before submitting,
+# which is the only diagnostic available when container logs are out of reach.
+[ -n "${VERBOSE:-}" ] && EXTRA+=(--verbose)
 
 if [ -n "${KEYTAB:-}" ]; then
   EXTRA+=(--keytab "$KEYTAB" --principal "${PRINCIPAL:?PRINCIPAL is required with KEYTAB}")
