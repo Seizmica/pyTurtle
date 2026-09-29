@@ -23,6 +23,15 @@ def test_loads_the_named_environment(tmp_path):
 
 
 @pytest.mark.parametrize("environment", ["dev", "uat", "preprod", "prod"])
+def test_no_environment_sets_driver_java_options(environment):
+    """A driver JVM flag set here is accepted and then ignored - the driver JVM
+    is already running by the time the file is read. It belongs at submission."""
+    settings = config.load(environment)
+
+    assert "spark.driver.extraJavaOptions" not in settings.prefixed("SPARK_CONF.")
+
+
+@pytest.mark.parametrize("environment", ["dev", "uat", "preprod", "prod"])
 def test_every_environment_ships_a_file(environment):
     """The four real .env files must exist and parse."""
     settings = config.load(environment)

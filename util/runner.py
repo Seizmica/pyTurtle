@@ -172,6 +172,18 @@ def build_spark(job: Job, settings: Settings) -> SparkSession:
         builder = builder.master(master)
 
     conf = settings.prefixed("SPARK_CONF.")
+    if "spark.driver.extraJavaOptions" in conf:
+        # Accepted into the conf and then ignored: the driver JVM is already
+        # running by the time this executes — the ApplicationMaster's under
+        # --deploy-mode cluster — so its flags were fixed at launch. Warn
+        # rather than drop it silently, because the symptom otherwise shows up
+        # far from the cause, as a -D that simply never took effect.
+        log.warning(
+            "SPARK_CONF.spark.driver.extraJavaOptions has no effect on an already-started "
+            "driver JVM; pass it at submission instead (DRIVER_JAVA_OPTIONS in submit.sh, "
+            "or --driver-java-options)"
+        )
+
     if job.uses_delta():
         conf.setdefault("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         conf.setdefault(
