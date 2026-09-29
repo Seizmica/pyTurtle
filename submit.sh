@@ -24,6 +24,8 @@
 #                          --driver-java-options yourself; it is the same
 #                          setting and would replace, not extend, this)
 #   EXECUTOR_JAVA_OPTIONS  -D flags for the executor JVMs
+#   CLUSTER_PYTHON       interpreter for the driver and executors, e.g.
+#                        /usr/bin/python3.11 (must be 3.8+ for PySpark 3.5)
 #   VERBOSE              print the resolved spark-submit configuration
 #   TRUSTSTORE           a cacerts file to ship and trust (see below)
 #   TRUSTSTORE_PASSWORD  only if it is not the JDK default
@@ -146,6 +148,16 @@ fi
 [ -n "$JARS" ] && EXTRA+=(--jars "$JARS")
 
 [ -n "${SPARK_PACKAGES:-}" ] && EXTRA+=(--packages "$SPARK_PACKAGES")
+
+# The interpreter the driver and executors run. Unset, YARN launches whatever
+# "python3" resolves to on the node, which on an older distribution can be 3.6
+# -- and PySpark 3.5 requires 3.8+, so the driver dies importing pyspark before
+# main() runs: no log line, no failure report, just exit 1 and an AM that gave
+# up waiting for a SparkContext. Both sides must be the same minor version.
+if [ -n "${CLUSTER_PYTHON:-}" ]; then
+  EXTRA+=(--conf "spark.yarn.appMasterEnv.PYSPARK_PYTHON=${CLUSTER_PYTHON}")
+  EXTRA+=(--conf "spark.executorEnv.PYSPARK_PYTHON=${CLUSTER_PYTHON}")
+fi
 
 # Prints the fully resolved configuration to this terminal before submitting,
 # which is the only diagnostic available when container logs are out of reach.
