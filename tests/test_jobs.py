@@ -205,3 +205,68 @@ def test_run_date_reaches_the_sql():
 
     assert "2026-06-28" in rendered
     assert "${run_date}" not in rendered
+
+
+# --- reader options ------------------------------------------------------
+
+
+class _FakeReader:
+    """Records what load_source asks of the DataFrameReader."""
+
+    def __init__(self):
+        self.format_name = None
+        self.options = {}
+        self.loaded = None
+
+    def format(self, name):
+        self.format_name = name
+        return self
+
+    def option(self, key, value):
+        self.options[key] = value
+        return self
+
+    def load(self, path):
+        self.loaded = path
+        return object()
+
+
+class _FakeSpark:
+    def __init__(self):
+        self.read = _FakeReader()
+
+
+def test_input_option_values_resolve_tokens():
+    """A glob at the partition level needs basePath, and basePath is a path.
+
+    Passed through verbatim it would reach Spark as a literal "${RAW_ROOT}/..."
+    directory, so option values get the same resolution the path does.
+    """
+    from util.runner import load_source
+
+    settings = Settings(environment="dev", values={"RAW_ROOT": "hdfs://nn/raw"})
+    source = {
+        "path": "${RAW_ROOT}/i_customers/business_date=*/",
+        "format": "parquet",
+        "options": {"basePath": "${RAW_ROOT}/i_customers/"},
+    }
+    job = _job(inputs={"customers": source})
+    spark = _FakeSpark()
+
+    _df, described = load_source(spark, job, settings, source, run_date="2026-10-07")
+
+    assert spark.read.options["basePath"] == "hdfs://nn/raw/i_customers/"
+    assert described == "hdfs://nn/raw/i_customers/business_date=*/"
+    assert spark.read.format_name == "parquet"
+
+
+def test_non_string_option_values_pass_through_untouched():
+    from util.runner import load_source
+
+    settings = Settings(environment="dev", values={"RAW_ROOT": "hdfs://nn/raw"})
+    source = {"path": "${RAW_ROOT}/x/", "options": {"mergeSchema": True, "maxRecords": 10}}
+    spark = _FakeSpark()
+
+    load_source(spark, _job(inputs={"x": source}), settings, source)
+
+    assert spark.read.options == {"mergeSchema": True, "maxRecords": 10}
