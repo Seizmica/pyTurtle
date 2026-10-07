@@ -270,6 +270,11 @@ def load_source(
     path = settings.resolve(spec["path"], **params)
     reader = spark.read.format(_fmt(source, job))
     for key, value in (spec.get("options") or {}).items():
+        # Option values carry the same ${TOKEN}s a path does — `basePath` is a
+        # path in its own right — so they get the same resolution. Non-string
+        # values are left alone, since only a string can hold a token.
+        if isinstance(value, str):
+            value = settings.resolve(value, **params)
         reader = reader.option(key, value)
     return reader.load(path), path
 
