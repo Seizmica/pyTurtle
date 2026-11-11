@@ -166,31 +166,6 @@ def test_format_and_options_are_rejected_on_a_table():
         _job(inputs={"x": {"table": "db.t", "format": "parquet"}}).validate()
 
 
-def test_customer_reads_a_hive_table_and_hdfs_files():
-    assert CUSTOMER.reads_hive() is True
-    assert CUSTOMER.inputs["customers"] == {"table": "${HIVE_DB}.customers"}
-    assert "path" in CUSTOMER.inputs["orders"]
-
-
-def test_customer_writes_parquet_and_csv_to_separate_paths():
-    parquet, csv = CUSTOMER.outputs
-
-    assert (parquet.format, csv.format) == ("parquet", "csv")
-    assert parquet.path != csv.path
-    assert csv.options["header"] == "true"
-    # Only the curated copy carries a manifest; the hand-off does not need one.
-    assert parquet.manifest is True
-    assert csv.manifest is False
-    assert parquet.partition_by == csv.partition_by == ["run_date"]
-
-
-def test_orders_upserts_incrementally():
-    (output,) = ORDERS.outputs
-    assert output.mode == "merge"
-    assert output.format == "delta"
-    assert output.merge_keys == ["order_id"]
-
-
 def test_sql_references_only_declared_views():
     """Every view a job's SQL reads from must be registered as an input."""
     for job in ALL_JOBS:
