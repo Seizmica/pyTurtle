@@ -222,6 +222,28 @@ The shipped `.env` files set
 partitions it produces. Without it, a static overwrite wipes the whole table —
 including prior manifests, which breaks the checkpoint chain.
 
+## Compacting small files
+
+A shuffle-heavy job writes one file per task into every partition directory.
+`jobs/compact.py` merges a feed's output into files of about 50 MB:
+
+```bash
+./submit.sh compact prod 2026-06-28 \
+    --path '${CURATED_ROOT}/customer/run_date=${run_date}/' --format parquet
+python -m jobs.compact --env dev --run-date 2026-06-28 \
+    --path '${EXPORT_ROOT}/customer/' --format csv --option header=true --dry-run
+```
+
+- `--path` is one partition directory or a whole table; each directory holding
+  data files is planned separately, and one already at size is left alone.
+- `--target-mb` (default 50) is the upper bound per file. Compression is kept
+  from the existing files; csv needs an explicit `--option header=...`.
+- Files are rewritten into `<dir>/_compaction/`, row counts are checked, and
+  only then swapped in. A run that dies mid-swap is finished by the next run.
+  An existing `manifest.json` is updated to list the new shards.
+- Run it after the feed and before consumers — never while the feed writes the
+  same directory. Delta tables are refused; use `OPTIMIZE` for those.
+
 ## Testing
 
 ```bash
