@@ -26,7 +26,7 @@ import time
 import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterator
 
 from util import config
@@ -681,11 +681,33 @@ def run(
             spark.stop()
 
 
+RUN_DATE_FORMAT = "%Y-%m-%d"
+
+
+def resolve_run_date(value: str | None) -> str:
+    """``--run-date`` as ``yyyy-MM-dd``, or today's calendar date when omitted.
+
+    "Today" is the driver's local clock — under ``--deploy-mode cluster`` that
+    is the cluster node's timezone, not the submitting machine's.
+    """
+    if not value:
+        today = date.today().strftime(RUN_DATE_FORMAT)
+        log.info("no --run-date given - using today's date %s", today)
+        return today
+    try:
+        # Normalized, so 2026-6-8 becomes 2026-06-08 and partitions stay uniform.
+        return datetime.strptime(value, RUN_DATE_FORMAT).date().strftime(RUN_DATE_FORMAT)
+    except ValueError as exc:
+        raise ConfigError(f"--run-date must be yyyy-MM-dd, got {value!r}") from exc
+
+
 def main(job: Job, argv: list[str] | None = None) -> int:
     """CLI entry point for a job script."""
     parser = argparse.ArgumentParser(prog=job.name, description=f"Run the {job.name} feed.")
     parser.add_argument("--env", choices=config.ENVIRONMENTS, help="Defaults to $APP_ENV")
-    parser.add_argument("--run-date", required=True, metavar="YYYY-MM-DD")
+    parser.add_argument(
+        "--run-date", metavar="YYYY-MM-DD", help="Defaults to today's date on the driver"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Plan only, write nothing")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
@@ -697,8 +719,9 @@ def main(job: Job, argv: list[str] | None = None) -> int:
     )
 
     try:
+        run_date = resolve_run_date(args.run_date)
         settings = config.load(args.env)
-        run(job, settings, args.run_date, args.dry_run)
+        run(job, settings, run_date, args.dry_run)
     except ConfigError as exc:
         log.error("%s", exc)
         return EXIT_CONFIG

@@ -115,6 +115,54 @@ def test_main_returns_zero_when_the_run_succeeds(monkeypatch):
     assert main(_job(), ARGV) == 0
 
 
+# --- run date ------------------------------------------------------------
+
+
+class _FrozenDate(runner.date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 3, 7)
+
+
+def _capture_run_date(monkeypatch):
+    seen = {}
+
+    def fake_run(_job, _settings, run_date, _dry_run):
+        seen["run_date"] = run_date
+        return {}
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    return seen
+
+
+def test_run_date_defaults_to_today(monkeypatch):
+    monkeypatch.setattr(runner, "date", _FrozenDate)
+    seen = _capture_run_date(monkeypatch)
+
+    assert main(_job(), ["--env", "dev"]) == 0
+    assert seen["run_date"] == "2026-03-07"
+
+
+def test_an_explicit_run_date_wins_over_today(monkeypatch):
+    monkeypatch.setattr(runner, "date", _FrozenDate)
+    seen = _capture_run_date(monkeypatch)
+
+    assert main(_job(), ARGV) == 0
+    assert seen["run_date"] == "2026-06-28"
+
+
+def test_a_run_date_is_normalized_to_yyyy_mm_dd():
+    assert runner.resolve_run_date("2026-6-8") == "2026-06-08"
+
+
+@pytest.mark.parametrize("bad", ["28-06-2026", "2026/06/28", "20260628", "2026-02-30", "today"])
+def test_a_malformed_run_date_is_a_config_error(monkeypatch, bad):
+    seen = _capture_run_date(monkeypatch)
+
+    assert main(_job(), ["--env", "dev", "--run-date", bad]) == EXIT_CONFIG
+    assert "run_date" not in seen  # rejected before any Spark work
+
+
 # --- the report itself ---------------------------------------------------
 
 

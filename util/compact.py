@@ -62,6 +62,7 @@ from util.runner import (
     _stage,
     _write_text,
     build_spark,
+    resolve_run_date,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -484,7 +485,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--env", choices=config.ENVIRONMENTS, help="Defaults to $APP_ENV")
     parser.add_argument(
-        "--run-date", metavar="YYYY-MM-DD", help="Fills ${run_date} in --path, if it has one"
+        "--run-date",
+        metavar="YYYY-MM-DD",
+        help="Fills ${run_date} in --path; defaults to today's date on the driver",
     )
     parser.add_argument(
         "--path", required=True, help="A partition directory or a whole table; ${TOKEN}s resolve"
@@ -511,9 +514,7 @@ def main(argv: list[str] | None = None) -> int:
     spark = None
     try:
         settings = config.load(args.env)
-        params = {**settings.values}
-        if args.run_date:
-            params["run_date"] = args.run_date
+        params = {**settings.values, "run_date": resolve_run_date(args.run_date)}
         root = settings.resolve(args.path, **params)
         options = parse_options(args.option)
         target_bytes = int(args.target_mb * 2**20)

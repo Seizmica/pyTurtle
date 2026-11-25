@@ -3,6 +3,8 @@
 #
 #   ./submit.sh customer prod 2026-09-25
 #   ./submit.sh customer dev  2026-09-25 --dry-run
+#   ./submit.sh customer prod                 # run date = today, on the driver
+#   ./submit.sh customer dev  --dry-run
 #
 # Cluster mode runs the driver on a cluster node, so the submitting machine
 # needs only spark-submit and a JRE — no PySpark, and no Python newer than
@@ -32,10 +34,18 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-JOB="${1:?usage: submit.sh <job> <env> <run-date> [extra job args]}"
-ENV="${2:?usage: submit.sh <job> <env> <run-date> [extra job args]}"
-RUN_DATE="${3:?usage: submit.sh <job> <env> <run-date> [extra job args]}"
-shift 3
+JOB="${1:?usage: submit.sh <job> <env> [run-date] [extra job args]}"
+ENV="${2:?usage: submit.sh <job> <env> [run-date] [extra job args]}"
+shift 2
+
+# The run date is optional. The third argument counts as one only when it looks
+# like a date, so `submit.sh customer dev --dry-run` still works. Left out, the
+# job defaults to today's date on the driver.
+RUN_DATE_ARGS=()
+if [[ "${1:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  RUN_DATE_ARGS=(--run-date "$1")
+  shift
+fi
 
 [ -f "jobs/${JOB}.py" ] || { echo "no such job: jobs/${JOB}.py" >&2; exit 2; }
 [ -f ".env.${ENV}" ] || { echo "no such environment: .env.${ENV}" >&2; exit 2; }
@@ -194,4 +204,4 @@ exec "${SPARK_HOME:?set SPARK_HOME to the Spark client matching the cluster}/bin
   ${EXTRA[@]+"${EXTRA[@]}"} \
   "jobs/${JOB}.py" \
   --env "$ENV" \
-  --run-date "$RUN_DATE" "$@"
+  ${RUN_DATE_ARGS[@]+"${RUN_DATE_ARGS[@]}"} "$@"

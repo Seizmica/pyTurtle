@@ -29,6 +29,11 @@ Run from the repo root — `jobs/` and `util/` are imported as namespace
 packages, which is why there is no `__init__.py` anywhere and why `-m` is used
 instead of `python jobs/customer.py`.
 
+`--run-date` is optional: left out, it defaults to today's calendar date
+(`yyyy-MM-dd`) on the driver's clock — under `--deploy-mode cluster`, the
+cluster node's timezone. Pass it explicitly for reruns and backfills, so a
+rerun the next morning does not write the next day's partition instead.
+
 `--env` is required unless `APP_ENV` is set. `--dry-run` reads the inputs, runs
 the SQL, prints the plan and the row count, and writes nothing.
 
