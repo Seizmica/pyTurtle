@@ -2,6 +2,7 @@
 
     python -m jobs.customer --env dev --run-date 2026-06-28
     python -m jobs.customer --env prod --run-date 2026-06-28 --dry-run
+    python -m jobs.customer --env dev        # run date defaults to today
 
 Owner: data-eng@company.com
 """
@@ -11,19 +12,9 @@ from util.runner import Job, Output, main
 # ${RUN_DATE-style tokens} are resolved from the .env file plus --run-date.
 SQL = """
 SELECT
-    c.customer_id,
-    c.name,
-    c.segment,
-    SUM(o.amount)                AS total_spend,
-    COUNT(o.order_id)            AS order_count,
-    MAX(o.ordered_at)            AS last_order_at,
+    customer_id,
     '${run_date}'                AS run_date
-FROM customers c
-JOIN orders o
-  ON c.customer_id = o.customer_id
-WHERE o.ordered_at >= '${run_date}'
-  AND o.status = 'settled'
-GROUP BY c.customer_id, c.name, c.segment
+FROM i_db.i_customers
 """
 
 CUSTOMER = Job(
@@ -31,7 +22,7 @@ CUSTOMER = Job(
     sql=SQL,
     inputs={
         # A Hive metastore table: the catalog knows its location and format.
-        "customers": {"table": "${HIVE_DB}.customers"},
+        "customers": {"table": "i_db.i_customers"},
         # Files on HDFS: read with the DataFrameReader.
         "orders": {
             "path": "${RAW_ROOT}/orders/",
@@ -42,12 +33,15 @@ CUSTOMER = Job(
     outputs=[
         # Curated parquet for downstream jobs.
         Output(
-            path="${CURATED_ROOT}/customer/",
+            path="s3a://buscket/extract/customer/",
             format="parquet",
             mode="overwrite",
             partition_by=["run_date"],
             options={"compression": "snappy"},
             manifest=True,
+            # At most 8 files per run_date directory instead of one per shuffle
+            # partition. Tune to roughly output size / 128 MB.
+            coalesce=8,
         ),
         # A csv copy for the business hand-off, on its own path. The SQL runs
         # once; the cached result is written twice.
@@ -57,6 +51,8 @@ CUSTOMER = Job(
             mode="overwrite",
             partition_by=["run_date"],
             options={"header": "true", "compression": "gzip"},
+            # The hand-off gets a single file per run_date.
+            coalesce=1,
         ),
     ],
 )

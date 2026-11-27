@@ -39,6 +39,14 @@ def test_customer_writes_parquet_and_csv_to_separate_paths():
     assert parquet.partition_by == csv.partition_by == ["run_date"]
 
 
+def test_customer_outputs_are_coalesced():
+    parquet, csv = CUSTOMER.outputs
+
+    assert parquet.coalesce == 8
+    # The business hand-off is a single file per run_date.
+    assert csv.coalesce == 1
+
+
 def test_customer_outputs_overwrite_their_partition():
     assert [o.mode for o in CUSTOMER.outputs] == ["overwrite", "overwrite"]
 
