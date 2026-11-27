@@ -191,12 +191,32 @@ def test_format_and_options_are_rejected_on_a_table():
         _job(inputs={"x": {"table": "db.t", "format": "parquet"}}).validate()
 
 
+# Inputs a job declares but its SQL does not read. Each one is still loaded and
+# counted on every run, so this list should stay short and each entry should say
+# why it is kept.
+UNUSED_INPUTS = {
+    # customer reads i_db.i_customers directly; orders is kept declared while
+    # the feed is narrowed down, at the cost of one full scan per run.
+    ("customer", "orders"),
+}
+
+
 def test_sql_references_only_declared_views():
-    """Every view a job's SQL reads from must be registered as an input."""
+    """Every input a job declares must be read by its SQL."""
     for job in ALL_JOBS:
         sql = job.sql.lower()
         for view in job.inputs:
+            if (job.name, view) in UNUSED_INPUTS:
+                continue
             assert view.lower() in sql, f"{job.name}: input '{view}' unused in SQL"
+
+
+def test_unused_input_exceptions_are_still_needed():
+    """An exception that no longer applies must be removed, not left to rot."""
+    jobs = {job.name: job for job in ALL_JOBS}
+    for name, view in UNUSED_INPUTS:
+        assert view in jobs[name].inputs, f"{name}: '{view}' is no longer declared"
+        assert view.lower() not in jobs[name].sql.lower(), f"{name}: '{view}' is now used"
 
 
 def test_run_date_reaches_the_sql():

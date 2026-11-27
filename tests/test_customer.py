@@ -16,7 +16,7 @@ def test_customer_is_valid():
 
 def test_customer_reads_a_hive_table_and_hdfs_files():
     assert CUSTOMER.reads_hive() is True
-    assert CUSTOMER.inputs["customers"] == {"table": "${HIVE_DB}.customers"}
+    assert CUSTOMER.inputs["customers"] == {"table": "i_db.i_customers"}
     assert "path" in CUSTOMER.inputs["orders"]
 
 
