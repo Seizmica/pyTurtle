@@ -36,13 +36,15 @@ def submit(tmp_path):
     def run(*args):
         result = subprocess.run(
             ["bash", str(REPO_ROOT / "submit.sh"), *args],
-            env={
-                **os.environ,
-                "SPARK_HOME": str(spark_home),
-                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-            },
-            capture_output=True,
-            text=True,
+            env=dict(
+                os.environ,
+                SPARK_HOME=str(spark_home),
+                PATH="{}{}{}".format(bin_dir, os.pathsep, os.environ["PATH"]),
+            ),
+            # capture_output= and text= are 3.7+; these are the 3.6 spellings.
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
         )
         assert result.returncode == 0, result.stderr
         argv = result.stdout.splitlines()

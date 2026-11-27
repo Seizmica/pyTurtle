@@ -32,14 +32,11 @@ Delta tables are refused: rewriting their files behind the transaction log
 corrupts the table. Use ``OPTIMIZE`` for those.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging
 import math
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -88,33 +85,44 @@ _CODECS = {
 }
 
 
-@dataclass
 class Plan:
-    """What compacting one directory would do."""
+    """What compacting one directory would do.
 
-    directory: str
-    files: list[tuple[str, int]]  # (uri, size_bytes)
-    target_bytes: int
+    Written out rather than declared with ``@dataclass``, which Python 3.6
+    does not have.
+    """
+
+    def __init__(
+        self, directory: "str", files: "list[tuple[str, int]]", target_bytes: "int"
+    ) -> "None":
+        self.directory = directory
+        self.files = files  # [(uri, size_bytes)]
+        self.target_bytes = target_bytes
+
+    def __repr__(self) -> "str":
+        return "Plan(directory={!r}, files={}, target_bytes={})".format(
+            self.directory, len(self.files), self.target_bytes
+        )
 
     @property
-    def total_bytes(self) -> int:
+    def total_bytes(self) -> "int":
         return sum(size for _, size in self.files)
 
     @property
-    def target_files(self) -> int:
+    def target_files(self) -> "int":
         return target_file_count(self.total_bytes, self.target_bytes)
 
     @property
-    def needed(self) -> bool:
+    def needed(self) -> "bool":
         """Only when the rewrite would leave fewer files than there are now."""
         return len(self.files) > self.target_files
 
 
-def target_file_count(total_bytes: int, target_bytes: int) -> int:
+def target_file_count(total_bytes: "int", target_bytes: "int") -> "int":
     return max(1, math.ceil(total_bytes / (target_bytes * FILL)))
 
 
-def is_data_file(name: str, fmt: str) -> bool:
+def is_data_file(name: "str", fmt: "str") -> "bool":
     """A Spark output file of ``fmt``; anything else in the directory is left alone."""
     if _is_hidden(name) or name == MANIFEST_NAME:
         return False
@@ -123,13 +131,13 @@ def is_data_file(name: str, fmt: str) -> bool:
     return name.endswith(".csv") or ".csv." in name
 
 
-def infer_codec(fmt: str, names: list[str]) -> str | None:
+def infer_codec(fmt: "str", names: "list[str]") -> "str | None":
     """The compression the existing files use, so the rewrite keeps it.
 
     ``None`` when no name says, which leaves Spark's default in place.
     """
 
-    def codec(name: str) -> str | None:
+    def codec(name: "str") -> "str | None":
         if fmt == "parquet":
             stem = name[: -len(".parquet")]
             ext = stem.rsplit(".", 1)[1] if "." in stem else ""
@@ -147,7 +155,7 @@ def infer_codec(fmt: str, names: list[str]) -> str | None:
     return found.most_common(1)[0][0]
 
 
-def parse_options(pairs: list[str] | None) -> dict[str, str]:
+def parse_options(pairs: "list[str] | None") -> "dict[str, str]":
     options: dict[str, str] = {}
     for pair in pairs or []:
         key, sep, value = pair.partition("=")
@@ -162,7 +170,7 @@ def parse_options(pairs: list[str] | None) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-def _data_files(spark: SparkSession, directory: str, fmt: str) -> list[tuple[str, int]]:
+def _data_files(spark: "SparkSession", directory: "str", fmt: "str") -> "list[tuple[str, int]]":
     """``(uri, size)`` of the data files directly inside ``directory``, sorted."""
     _, fs, jpath = _fs(spark, directory)
     if not fs.exists(jpath):
@@ -174,18 +182,18 @@ def _data_files(spark: SparkSession, directory: str, fmt: str) -> list[tuple[str
     )
 
 
-def _delete(spark: SparkSession, path: str) -> None:
+def _delete(spark: "SparkSession", path: "str") -> "None":
     _, fs, jpath = _fs(spark, path)
     if fs.exists(jpath) and not fs.delete(jpath, True):
         raise OSError(f"could not delete {path}")
 
 
-def _qualified(spark: SparkSession, path: str) -> str:
+def _qualified(spark: "SparkSession", path: "str") -> "str":
     _, fs, jpath = _fs(spark, path)
     return str(fs.makeQualified(jpath)).rstrip("/")
 
 
-def _inside_delta_table(spark: SparkSession, path: str) -> bool:
+def _inside_delta_table(spark: "SparkSession", path: "str") -> "bool":
     """Whether ``path`` is a Delta table or sits inside one."""
     jvm, fs, jpath = _fs(spark, path)
     current = fs.makeQualified(jpath)
@@ -197,8 +205,8 @@ def _inside_delta_table(spark: SparkSession, path: str) -> bool:
 
 
 def discover(
-    spark: SparkSession, root: str, fmt: str
-) -> tuple[dict[str, list[tuple[str, int]]], set[str]]:
+    spark: "SparkSession", root: "str", fmt: "str"
+) -> "tuple[dict[str, list[tuple[str, int]]], set[str]]":
     """Data files under ``root`` grouped by directory, and directories with staging.
 
     Directories inside a Delta table nested under ``root`` are left out.
@@ -241,7 +249,7 @@ def discover(
 # --------------------------------------------------------------------------
 
 
-def _reader(spark: SparkSession, fmt: str, options: dict[str, str]) -> DataFrameReader:
+def _reader(spark: "SparkSession", fmt: "str", options: "dict[str, str]") -> "DataFrameReader":
     reader = spark.read.format(fmt)
     for key, value in options.items():
         reader = reader.option(key, value)
@@ -249,8 +257,8 @@ def _reader(spark: SparkSession, fmt: str, options: dict[str, str]) -> DataFrame
 
 
 def _rewrite_options(
-    fmt: str, options: dict[str, str], files: list[tuple[str, int]]
-) -> tuple[dict[str, str], dict[str, str]]:
+    fmt: "str", options: "dict[str, str]", files: "list[tuple[str, int]]"
+) -> "tuple[dict[str, str], dict[str, str]]":
     """Reader and writer options for one directory."""
     read = dict(options)
     write = dict(options)
@@ -266,7 +274,9 @@ def _rewrite_options(
     return read, write
 
 
-def compact_directory(spark: SparkSession, plan: Plan, fmt: str, options: dict[str, str]) -> dict:
+def compact_directory(
+    spark: "SparkSession", plan: "Plan", fmt: "str", options: "dict[str, str]"
+) -> "dict":
     """Rewrite one directory's files into ``plan.target_files`` files."""
     staging = f"{plan.directory}/{STAGING}"
     data = f"{staging}/data"
@@ -320,7 +330,7 @@ def compact_directory(spark: SparkSession, plan: Plan, fmt: str, options: dict[s
     return commit(spark, plan.directory, ready)
 
 
-def commit(spark: SparkSession, directory: str, ready: dict[str, Any]) -> dict:
+def commit(spark: "SparkSession", directory: "str", ready: "dict[str, Any]") -> "dict":
     """Swap the staged files in. Safe to repeat: every step skips what is done."""
     staging = f"{directory}/{STAGING}"
     fmt = ready["format"]
@@ -359,8 +369,8 @@ def commit(spark: SparkSession, directory: str, ready: dict[str, Any]) -> dict:
 
 
 def _refresh_manifest(
-    spark: SparkSession, directory: str, ready: dict[str, Any], files: list[tuple[str, int]]
-) -> None:
+    spark: "SparkSession", directory: "str", ready: "dict[str, Any]", files: "list[tuple[str, int]]"
+) -> "None":
     """Point an existing manifest.json at the new shards; keep everything else."""
     target = f"{directory}/{MANIFEST_NAME}"
     raw = _read_text(spark, target)
@@ -385,7 +395,7 @@ def _refresh_manifest(
     _write_text(spark, target, json.dumps(document, indent=2) + "\n")
 
 
-def recover(spark: SparkSession, directory: str) -> dict | None:
+def recover(spark: "SparkSession", directory: "str") -> "dict | None":
     """Finish a committed compaction a failure interrupted, or discard an unfinished one."""
     staging = f"{directory}/{STAGING}"
     raw = _read_text(spark, f"{staging}/{READY}")
@@ -398,13 +408,13 @@ def recover(spark: SparkSession, directory: str) -> dict | None:
 
 
 def compact(
-    spark: SparkSession,
-    root: str,
-    fmt: str,
-    target_bytes: int,
-    options: dict[str, str] | None = None,
-    dry_run: bool = False,
-) -> dict[str, Any]:
+    spark: "SparkSession",
+    root: "str",
+    fmt: "str",
+    target_bytes: "int",
+    options: "dict[str, str] | None" = None,
+    dry_run: "bool" = False,
+) -> "dict[str, Any]":
     """Compact every directory under ``root``. Returns a summary."""
     options = dict(options or {})
     if fmt not in FORMATS:
@@ -479,7 +489,7 @@ def compact(
 # --------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: "list[str] | None" = None) -> "int":
     parser = argparse.ArgumentParser(
         prog="compact", description="Merge small output files into files of about --target-mb."
     )

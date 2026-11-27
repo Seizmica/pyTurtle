@@ -274,6 +274,13 @@ ruff check jobs/ util/ tests/ && black --check jobs/ util/ tests/
 pytest tests -q
 ```
 
+The code stays **Python 3.6 compatible**, because the machine that submits jobs
+is pinned to 3.6. Loading a `.env`, validating a job and the non-Spark tests all
+run there. The Spark job itself runs on the cluster's interpreter (set
+`CLUSTER_PYTHON`), since PySpark 3.4+ needs 3.7+. In practice that means no
+`from __future__ import annotations`, no `dataclasses`, and quoted signature
+annotations. `tests/test_py36_compat.py` fails the build if any of that slips.
+
 `tests/test_run_local.py` needs a JDK (Java 11 or 17) and is skipped without
 one. The rest run anywhere.
 
