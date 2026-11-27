@@ -67,6 +67,10 @@ class Output:
     options: dict[str, str] = field(default_factory=dict)
     # Write a manifest.json into each partition directory this run produced.
     manifest: bool = False
+    # Coalesce the result to this many partitions before writing, so each
+    # partition directory gets at most this many files instead of one per
+    # shuffle partition. None leaves the result's partitioning as it is.
+    coalesce: int | None = None
 
     def validate(self, job_name: str) -> None:
         if self.format not in OUTPUT_FORMATS:
@@ -83,6 +87,18 @@ class Output:
                 raise ConfigError(f"{job_name}: mode 'merge' requires merge_keys")
         if not self.path:
             raise ConfigError(f"{job_name}: every output needs a path")
+        if self.coalesce is not None:
+            # bool is an int subclass; coalesce=True would silently mean 1.
+            if isinstance(self.coalesce, bool) or not isinstance(self.coalesce, int):
+                raise ConfigError(
+                    f"{job_name}: coalesce must be a whole number, got {self.coalesce!r}"
+                )
+            if self.coalesce < 1:
+                raise ConfigError(f"{job_name}: coalesce must be at least 1, got {self.coalesce}")
+            if self.mode == "merge":
+                # A merge's files are sized by Delta's own rewrite, not by the
+                # source's partitioning, so the setting would do nothing.
+                raise ConfigError(f"{job_name}: coalesce does not apply to mode 'merge'")
 
 
 @dataclass
@@ -278,6 +294,11 @@ def write(df: DataFrame, output: Output, output_path: str) -> None:
         _merge(df, output, output_path)
         return
 
+    if output.coalesce:
+        # Narrow, no shuffle: tasks are merged, not rows redistributed. Safe for
+        # the upstream SQL because run() caches the result first, so only the
+        # write stage runs on the reduced parallelism.
+        df = df.coalesce(output.coalesce)
     writer = df.write.format(output.format).mode(output.mode)
     if output.partition_by:
         writer = writer.partitionBy(*output.partition_by)
@@ -631,7 +652,13 @@ def run(
 
         if dry_run:
             for output, path in zip(job.outputs, paths):
-                log.info("would write %s as %s (mode=%s)", path, output.format, output.mode)
+                log.info(
+                    "would write %s as %s (mode=%s%s)",
+                    path,
+                    output.format,
+                    output.mode,
+                    f", coalesce={output.coalesce}" if output.coalesce else "",
+                )
             result.explain(mode="formatted")
             return metrics
 
@@ -649,7 +676,13 @@ def run(
                 )
 
                 write(result, output, path)
-                log.info("wrote %s (%s, mode=%s)", path, output.format, output.mode)
+                log.info(
+                    "wrote %s (%s, mode=%s%s)",
+                    path,
+                    output.format,
+                    output.mode,
+                    f", coalesce={output.coalesce}" if output.coalesce else "",
+                )
 
                 if output.manifest:
                     manifests += write_manifests(

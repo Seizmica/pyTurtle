@@ -13,7 +13,7 @@ pyspark = pytest.importorskip("pyspark")
 from pyspark.sql import SparkSession
 
 from util.config import Settings
-from util.runner import Job, Output, _key, build_spark, run
+from util.runner import Job, Output, _key, build_spark, run, write
 
 RUN_DATE = "2026-06-28"
 
@@ -204,6 +204,55 @@ def test_parquet_and_csv_written_from_one_run(settings, spark):
     assert [r["customer_id"] for r in from_parquet] == [1, 2]
     assert [int(r["customer_id"]) for r in from_csv] == [1, 2]
     assert [float(r["total_spend"]) for r in from_csv] == [15.0, 20.0]
+
+
+# --- coalesce ------------------------------------------------------------
+
+
+def _spread(spark, partitions=6):
+    """A result spread over several partitions, as a shuffle would leave it."""
+    rows = [(i, f"name-{i}", RUN_DATE) for i in range(60)]
+    return spark.createDataFrame(rows, ["customer_id", "name", "run_date"]).repartition(partitions)
+
+
+def _files(directory, suffix):
+    return [p for p in Path(directory).iterdir() if p.name.endswith(suffix)]
+
+
+def test_without_coalesce_each_partition_writes_its_own_file(spark, tmp_path):
+    write(_spread(spark), _parquet_out(path=str(tmp_path)), str(tmp_path))
+
+    assert len(_files(tmp_path / f"run_date={RUN_DATE}", ".parquet")) == 6
+
+
+@pytest.mark.parametrize("fmt,suffix", [("parquet", ".parquet"), ("csv", ".csv")])
+def test_coalesce_caps_the_files_per_partition_directory(spark, tmp_path, fmt, suffix):
+    output = _parquet_out(path=str(tmp_path), format=fmt, coalesce=2, manifest=False)
+
+    write(_spread(spark), output, str(tmp_path))
+
+    assert len(_files(tmp_path / f"run_date={RUN_DATE}", suffix)) == 2
+    assert spark.read.format(fmt).load(str(tmp_path)).count() == 60
+
+
+def test_coalesce_never_adds_partitions(spark, tmp_path):
+    """coalesce only merges; asking for more than there are leaves them be."""
+    write(_spread(spark, 3), _parquet_out(path=str(tmp_path), coalesce=10), str(tmp_path))
+
+    assert len(_files(tmp_path / f"run_date={RUN_DATE}", ".parquet")) == 3
+
+
+def test_run_writes_a_coalesced_output_with_a_correct_manifest(settings, spark):
+    """Through run(): the manifest describes the coalesced files, not the plan."""
+    spark.conf.set("spark.sql.shuffle.partitions", "4")
+    try:
+        run(_job(outputs=[_parquet_out(coalesce=1)]), settings, RUN_DATE, spark=spark)
+    finally:
+        spark.conf.set("spark.sql.shuffle.partitions", "1")
+
+    doc = _manifest(settings)
+    assert len(doc["shards"]) == 1
+    assert doc["row_count"] == 2
 
 
 def test_csv_output_is_partitioned_like_parquet(settings, spark):

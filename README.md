@@ -161,6 +161,24 @@ one — Spark writes csv without a header by default.
 | `merge_keys` | `[]` | Required for `mode="merge"` |
 | `options` | `{}` | Writer options for that format |
 | `manifest` | `False` | Write `manifest.json` per partition |
+| `coalesce` | `None` | Coalesce to this many partitions before writing — at most this many files per partition directory. Not for `mode="merge"` |
+
+`coalesce` is the cheap fix for small files: it merges the result's partitions
+without a shuffle, so each partition directory gets at most `coalesce` files
+instead of one per `spark.sql.shuffle.partitions`. Set it per output — a csv
+hand-off often wants exactly one file:
+
+```python
+outputs=[
+    Output(path="${CURATED_ROOT}/customer/", partition_by=["run_date"], coalesce=8),
+    Output(path="${EXPORT_ROOT}/customer/", format="csv", partition_by=["run_date"],
+           options={"header": "true"}, coalesce=1),
+]
+```
+
+Fewer partitions means fewer tasks doing the write, so size it to the data:
+roughly `output size / 128 MB`. It can only reduce the count, never raise it.
+For evenly sized files at a fixed target, use `jobs/compact.py` after the run.
 
 ## Environments
 

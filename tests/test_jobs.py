@@ -62,6 +62,31 @@ def test_merge_requires_keys():
         _job(outputs=_out(mode="merge", format="delta")).validate()
 
 
+@pytest.mark.parametrize("value", [None, 1, 8])
+def test_coalesce_accepts_a_positive_count_or_none(value):
+    _job(outputs=_out(coalesce=value)).validate()
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (0, "at least 1"),
+        (-2, "at least 1"),
+        (True, "whole number"),
+        (2.5, "whole number"),
+        ("4", "whole number"),
+    ],
+)
+def test_coalesce_rejects_anything_else(value, message):
+    with pytest.raises(ConfigError, match=message):
+        _job(outputs=_out(coalesce=value)).validate()
+
+
+def test_coalesce_does_not_apply_to_merge():
+    with pytest.raises(ConfigError, match="coalesce does not apply"):
+        _job(outputs=_out(mode="merge", format="delta", merge_keys=["id"], coalesce=2)).validate()
+
+
 def test_unknown_mode_is_rejected():
     with pytest.raises(ConfigError, match="mode must be"):
         _job(outputs=_out(mode="upsert")).validate()
